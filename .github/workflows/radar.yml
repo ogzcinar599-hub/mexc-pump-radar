@@ -1,0 +1,45 @@
+name: MEXC Pump Radar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Repository indir
+        uses: actions/checkout@v4
+
+      - name: Python kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Paketleri kur
+        run: |
+          pip install -r requirements.txt
+
+      - name: Radar çalıştır
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          timeout 280 python main.py || true
+
+      - name: Sinyal geçmişini kaydet
+        run: |
+          git config --global user.name "MEXC Pump Radar"
+          git config --global user.email "actions@github.com"
+
+          git add sent_signals.json || true
+
+          git diff --cached --quiet || git commit -m "Update signal history"
+
+          git push || true
