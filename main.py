@@ -10,66 +10,58 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # MEXC CRYPTO FUTURES PUMP RADAR V5
 #
 # 🟡 ERKEN PUMP
-# 🔥 GÜÇLÜ ERKEN PUMP
 # 🔻 PUMP SONRASI DÜŞÜŞ
 #
-# SADECE MEXC USDT CRYPTO FUTURES
-# STOCK / ETF / INDEX FİLTRELİ
+# SADECE MEXC CRYPTO FUTURES
+# STOCK / ETF / INDEX YOK
 # ============================================================
 
 
 BASE = "https://contract.mexc.com"
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
 
 
 # ============================================================
 # AYARLAR
 # ============================================================
 
-# 24H minimum hacim
-MIN_24H_VOLUME = 250000
+# Minimum 24H hacim
+MIN_24H_VOLUME = 300000
 
-# Çok düşmüş coinleri alma
-MIN_24H_CHANGE = -20
-
-# Çoktan aşırı pump yapmış coinleri alma
-MAX_24H_CHANGE = 60
+# 24H değişim filtresi
+MIN_24H_CHANGE = -25
+MAX_24H_CHANGE = 80
 
 
 # ============================================================
-# SİNYAL PUANLARI
+# SİNYAL SKORLARI
 # ============================================================
 
-# Erken pump
+# Erken pump minimum skor
 MIN_EARLY_SCORE = 65
 
-# Güçlü erken pump
-STRONG_EARLY_SCORE = 75
-
-# Pump sonrası düşüş
-MIN_DROP_SCORE = 68
+# Pump sonrası düşüş minimum skor
+MIN_DROP_SCORE = 70
 
 
-# ============================================================
-# MAKSİMUM SİNYAL
-# ============================================================
-
+# Bir taramada maksimum sinyal
 MAX_SIGNALS_PER_SCAN = 4
 
 
-# ============================================================
-# AYNI COİN TEKRAR SÜRESİ
-# ============================================================
-
+# Aynı coin tekrar gönderilmesin
 DUPLICATE_HOURS = 4
 
 
-# ============================================================
-# PARALEL TARAMA
-# ============================================================
-
+# Paralel tarama
 MAX_WORKERS = 20
 
 
@@ -98,125 +90,8 @@ SENT_FILE = "sent_signals.json"
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 MEXC-Pump-Radar-V5"
+    "User-Agent": "Mozilla/5.0 MEXC-Pump-Radar/5.0"
 })
-
-
-# ============================================================
-# STOCK / ETF / INDEX KORUMASI
-# ============================================================
-
-BLOCK_WORDS = [
-
-    "STOCK",
-    "ETF",
-    "INDEX",
-    "INDEXES",
-    "SP500",
-    "SPX",
-    "NASDAQ",
-    "DOW",
-    "DJI",
-    "NYSE",
-    "TSLA",
-    "AAPL",
-    "AMZN",
-    "GOOG",
-    "GOOGL",
-    "META",
-    "MSFT",
-    "NVDA",
-    "NFLX",
-    "COIN",
-    "MSTR",
-    "HOOD",
-    "PLTR",
-    "AMD",
-    "INTC",
-    "BA",
-    "DIS",
-    "NIO",
-    "PFE",
-    "QQQ",
-    "SPY",
-    "DXY",
-    "GOLD",
-    "SILVER",
-    "OIL",
-    "BRENT",
-    "WTI"
-]
-
-
-def is_normal_crypto_contract(symbol, data=None):
-
-    """
-    Sadece normal crypto futures bırakmaya çalışır.
-
-    Örnek:
-    BTC_USDT      -> EVET
-    ETH_USDT      -> EVET
-    NEAR_USDT     -> EVET
-
-    STOCK / ETF / INDEX benzeri:
-    -> HAYIR
-    """
-
-    if not symbol:
-        return False
-
-    symbol_upper = symbol.upper()
-
-    # USDT zorunlu
-    if not symbol_upper.endswith("_USDT"):
-        return False
-
-    # Blok kelimeleri
-    for word in BLOCK_WORDS:
-
-        if word in symbol_upper:
-
-            return False
-
-
-    # API contract bilgisi varsa ayrıca kontrol
-    if isinstance(data, dict):
-
-        base_coin = str(
-            data.get("baseCoin", "")
-        ).upper()
-
-        quote_coin = str(
-            data.get("quoteCoin", "")
-        ).upper()
-
-        settle_coin = str(
-            data.get("settleCoin", "")
-        ).upper()
-
-
-        if quote_coin and quote_coin != "USDT":
-            return False
-
-        if settle_coin and settle_coin != "USDT":
-            return False
-
-
-        combined = (
-            symbol_upper
-            + "_"
-            + base_coin
-        )
-
-
-        for word in BLOCK_WORDS:
-
-            if word in combined:
-
-                return False
-
-
-    return True
 
 
 # ============================================================
@@ -235,10 +110,7 @@ def load_sent():
                 encoding="utf-8"
             ) as f:
 
-                data = json.load(f)
-
-                if isinstance(data, dict):
-                    return data
+                return json.load(f)
 
     except Exception as e:
 
@@ -314,6 +186,12 @@ def get_json(
 
 # ============================================================
 # TELEGRAM
+#
+# HTML KULLANMIYORUZ.
+# Böylece:
+# "can't parse entities"
+# "Unexpected end tag"
+# HATALARI OLMAZ.
 # ============================================================
 
 def send_telegram(text):
@@ -325,7 +203,6 @@ def send_telegram(text):
         )
 
         return False
-
 
     if not CHAT_ID:
 
@@ -344,13 +221,14 @@ def send_telegram(text):
 
     payload = {
 
-        "chat_id": CHAT_ID,
+        "chat_id":
+            CHAT_ID,
 
-        "text": text,
+        "text":
+            text,
 
-        "parse_mode": "HTML",
-
-        "disable_web_page_preview": True
+        "disable_web_page_preview":
+            True
     }
 
 
@@ -397,21 +275,18 @@ def telegram_test():
 
     message = (
 
-        "🟢 <b>PUMP RADAR V5 AKTİF</b>\n\n"
+        "🟢 PUMP RADAR AKTİF\n\n"
 
         "✅ Telegram bağlantısı çalışıyor.\n"
         "✅ GitHub Actions çalışıyor.\n\n"
 
-        "💎 Sadece MEXC Crypto Futures\n"
-        "🚫 Stock / ETF / Index yok\n\n"
+        "🚫 Stock / ETF / Index yok\n"
+        "💎 Sadece MEXC Crypto Futures\n\n"
 
         "🔎 4H dip + dönüş\n"
         "📈 1H trend\n"
-        "⚡ 15M momentum\n"
-        "📊 Hacim artışı\n"
-        "🔻 Pump sonrası düşüş\n\n"
-
-        "🎯 Daha esnek puanlama sistemi aktif."
+        "⚡ 15M momentum + hacim\n"
+        "🔻 Pump sonrası düşüş takibi"
     )
 
 
@@ -442,69 +317,46 @@ def get_futures_contracts():
     )
 
 
-    if not isinstance(rows, list):
-
-        return []
-
-
     result = []
 
 
     for x in rows:
 
-        if not isinstance(x, dict):
-
-            continue
-
-
-        symbol = str(
-            x.get(
-                "symbol",
-                ""
-            )
-        ).upper()
+        symbol = x.get(
+            "symbol",
+            ""
+        )
 
 
-        quote = str(
-            x.get(
-                "quoteCoin",
-                ""
-            )
-        ).upper()
+        quote = x.get(
+            "quoteCoin",
+            ""
+        )
 
 
-        settle = str(
-            x.get(
-                "settleCoin",
-                ""
-            )
-        ).upper()
+        settle = x.get(
+            "settleCoin",
+            ""
+        )
 
 
-        # ----------------------------------------------------
-        # USDT FUTURES
-        # ----------------------------------------------------
+        # ====================================================
+        # SADECE USDT FUTURES
+        # ====================================================
 
-        if not symbol.endswith("_USDT"):
-            continue
-
-
-        if quote and quote != "USDT":
-            continue
-
-
-        if settle and settle != "USDT":
-            continue
-
-
-        # ----------------------------------------------------
-        # STOCK / ETF / INDEX ENGELİ
-        # ----------------------------------------------------
-
-        if not is_normal_crypto_contract(
-            symbol,
-            x
+        if not symbol.endswith(
+            "_USDT"
         ):
+
+            continue
+
+
+        if quote != "USDT":
+
+            continue
+
+
+        if settle != "USDT":
 
             continue
 
@@ -554,93 +406,74 @@ def get_futures_tickers():
 
         try:
 
-            symbol = str(
-                x.get(
-                    "symbol",
-                    ""
-                )
-            ).upper()
+            symbol = x.get(
+                "symbol",
+                ""
+            )
 
 
-            if not is_normal_crypto_contract(
-                symbol
+            if not symbol.endswith(
+                "_USDT"
             ):
 
                 continue
 
 
-            price = float(
-                x.get(
-                    "lastPrice",
-                    0
-                )
-                or 0
-            )
-
-
-            change = float(
-                x.get(
-                    "riseFallRate",
-                    0
-                )
-                or 0
-            ) * 100
-
-
-            volume = float(
-                x.get(
-                    "amount24",
-                    0
-                )
-                or 0
-            )
-
-
-            volume_contract = float(
-                x.get(
-                    "volume24",
-                    0
-                )
-                or 0
-            )
-
-
-            high24 = float(
-                x.get(
-                    "high24Price",
-                    0
-                )
-                or 0
-            )
-
-
-            low24 = float(
-                x.get(
-                    "lower24Price",
-                    0
-                )
-                or 0
-            )
-
-
-            if price <= 0:
-                continue
-
-
             result[symbol] = {
 
-                "price": price,
+                "price":
+                    float(
+                        x.get(
+                            "lastPrice",
+                            0
+                        )
+                        or 0
+                    ),
 
-                "change": change,
+                "change":
+                    float(
+                        x.get(
+                            "riseFallRate",
+                            0
+                        )
+                        or 0
+                    ) * 100,
 
-                "volume": volume,
+                "volume":
+                    float(
+                        x.get(
+                            "amount24",
+                            0
+                        )
+                        or 0
+                    ),
 
                 "volume_contract":
-                    volume_contract,
+                    float(
+                        x.get(
+                            "volume24",
+                            0
+                        )
+                        or 0
+                    ),
 
-                "high24": high24,
+                "high24":
+                    float(
+                        x.get(
+                            "high24Price",
+                            0
+                        )
+                        or 0
+                    ),
 
-                "low24": low24
+                "low24":
+                    float(
+                        x.get(
+                            "lower24Price",
+                            0
+                        )
+                        or 0
+                    )
             }
 
 
@@ -653,7 +486,7 @@ def get_futures_tickers():
 
 
 # ============================================================
-# KLINE
+# FUTURES KLINE
 # ============================================================
 
 def get_klines(
@@ -680,10 +513,7 @@ def get_klines(
     )
 
 
-    if not isinstance(
-        market,
-        dict
-    ):
+    if not market:
 
         return []
 
@@ -723,11 +553,6 @@ def get_klines(
     )
 
 
-    if count <= 0:
-
-        return []
-
-
     start = max(
         0,
         count - limit
@@ -746,25 +571,30 @@ def get_klines(
 
             candles.append({
 
-                "open": float(
-                    opens[i]
-                ),
+                "open":
+                    float(
+                        opens[i]
+                    ),
 
-                "high": float(
-                    highs[i]
-                ),
+                "high":
+                    float(
+                        highs[i]
+                    ),
 
-                "low": float(
-                    lows[i]
-                ),
+                "low":
+                    float(
+                        lows[i]
+                    ),
 
-                "close": float(
-                    closes[i]
-                ),
+                "close":
+                    float(
+                        closes[i]
+                    ),
 
-                "volume": float(
-                    volumes[i]
-                )
+                "volume":
+                    float(
+                        volumes[i]
+                    )
             })
 
 
@@ -850,11 +680,15 @@ def rsi(
                 change
             )
 
-            losses.append(0)
+            losses.append(
+                0
+            )
 
         else:
 
-            gains.append(0)
+            gains.append(
+                0
+            )
 
             losses.append(
                 abs(change)
@@ -947,50 +781,7 @@ def price_format(price):
 
 
 # ============================================================
-# VOLUME RATIO
-# ============================================================
-
-def get_volume_ratio(candles):
-
-    if len(candles) < 22:
-
-        return 0
-
-
-    volumes = [
-
-        x["volume"]
-
-        for x in candles[-21:-1]
-
-        if x["volume"] > 0
-    ]
-
-
-    if not volumes:
-
-        return 0
-
-
-    avg_volume = (
-        sum(volumes)
-        / len(volumes)
-    )
-
-
-    if avg_volume <= 0:
-
-        return 0
-
-
-    return (
-        candles[-1]["volume"]
-        / avg_volume
-    )
-
-
-# ============================================================
-# ERKEN PUMP V5
+# ERKEN PUMP ANALİZİ
 # ============================================================
 
 def analyze_early(
@@ -1015,10 +806,12 @@ def analyze_early(
         for x in c4
     ]
 
+
     close1 = [
         x["close"]
         for x in c1
     ]
+
 
     close15 = [
         x["close"]
@@ -1026,7 +819,9 @@ def analyze_early(
     ]
 
 
-    price = ticker["price"]
+    price = ticker[
+        "price"
+    ]
 
 
     # ========================================================
@@ -1038,14 +833,16 @@ def analyze_early(
         20
     )
 
-    ema50_4 = ema(
-        close4,
-        50
-    )
 
     ema20_4_prev = ema(
         close4[:-1],
         20
+    )
+
+
+    ema50_4 = ema(
+        close4,
+        50
     )
 
 
@@ -1054,10 +851,12 @@ def analyze_early(
         20
     )
 
+
     ema50_1 = ema(
         close1,
         50
     )
+
 
     ema20_1_prev = ema(
         close1[:-1],
@@ -1079,9 +878,11 @@ def analyze_early(
         close4
     )
 
+
     rsi1 = rsi(
         close1
     )
+
 
     rsi15 = rsi(
         close15
@@ -1089,16 +890,21 @@ def analyze_early(
 
 
     if not all([
+
         ema20_4,
-        ema50_4,
         ema20_4_prev,
+        ema50_4,
+
         ema20_1,
         ema50_1,
         ema20_1_prev,
+
         ema20_15,
+
         rsi4,
         rsi1,
         rsi15
+
     ]):
 
         return None
@@ -1108,12 +914,7 @@ def analyze_early(
     # 4H DİP
     # ========================================================
 
-    recent4 = c4[-17:-1]
-
-
-    if len(recent4) < 8:
-
-        return None
+    recent4 = c4[-13:-1]
 
 
     swing_low = min(
@@ -1136,20 +937,100 @@ def analyze_early(
     ) * 100
 
 
-    # Çok yukarı kaçmış coinleri alma
+    # Çok erken / çok geç olmasın
+
+    if recovery < 0.5:
+
+        return None
+
+
     if recovery > 12:
 
         return None
 
 
-    # Aşırı zayıf coin
-    if rsi4 < 30:
+    # ========================================================
+    # RSI 4H
+    # ========================================================
+
+    if rsi4 < 32:
 
         return None
 
 
-    # Aşırı pump bölgesi
-    if rsi4 > 72:
+    if rsi4 > 67:
+
+        return None
+
+
+    # ========================================================
+    # EMA DÖNÜŞ
+    # ========================================================
+
+    if ema20_4 <= ema20_4_prev:
+
+        return None
+
+
+    # ========================================================
+    # SON 3 MUM
+    # ========================================================
+
+    green4 = sum(
+
+        1
+
+        for x in c4[-3:]
+
+        if x["close"] > x["open"]
+
+    )
+
+
+    if green4 < 1:
+
+        return None
+
+
+    # ========================================================
+    # 1H TREND
+    # ========================================================
+
+    if price < ema20_1 * 0.99:
+
+        return None
+
+
+    if ema20_1 <= ema20_1_prev:
+
+        return None
+
+
+    if rsi1 < 38:
+
+        return None
+
+
+    if rsi1 > 73:
+
+        return None
+
+
+    # ========================================================
+    # 15M MOMENTUM
+    # ========================================================
+
+    if price < ema20_15 * 0.995:
+
+        return None
+
+
+    if rsi15 < 38:
+
+        return None
+
+
+    if rsi15 > 75:
 
         return None
 
@@ -1158,9 +1039,53 @@ def analyze_early(
     # HACİM
     # ========================================================
 
-    volume_ratio = get_volume_ratio(
-        c15
-    )
+    volumes = [
+
+        x["volume"]
+
+        for x in c15[-21:-1]
+
+        if x["volume"] > 0
+
+    ]
+
+
+    if volumes:
+
+        avg_volume = (
+            sum(volumes)
+            / len(volumes)
+        )
+
+
+        volume_ratio = (
+            c15[-1]["volume"]
+            / avg_volume
+        )
+
+    else:
+
+        volume_ratio = 0
+
+
+    # ========================================================
+    # SON 15M MOMENTUM
+    # ========================================================
+
+    momentum15 = (
+
+        (
+            close15[-1]
+            - close15[-4]
+        )
+        / close15[-4]
+    ) * 100
+
+
+    # Aşırı negatif momentum
+    if momentum15 < -3:
+
+        return None
 
 
     # ========================================================
@@ -1170,23 +1095,17 @@ def analyze_early(
     score = 0
 
 
-    # --------------------------------------------------------
-    # 4H DIP
-    # --------------------------------------------------------
+    # Dipten dönüş
 
-    if recovery <= 2:
+    if 0.5 <= recovery <= 4:
 
         score += 20
 
-    elif recovery <= 4:
-
-        score += 18
-
-    elif recovery <= 6:
+    elif recovery <= 7:
 
         score += 15
 
-    elif recovery <= 9:
+    elif recovery <= 10:
 
         score += 10
 
@@ -1195,227 +1114,133 @@ def analyze_early(
         score += 5
 
 
-    # --------------------------------------------------------
-    # 4H RSI
-    # --------------------------------------------------------
+    # EMA dönüş
 
-    if 40 <= rsi4 <= 55:
-
-        score += 15
-
-    elif 35 <= rsi4 < 40:
-
-        score += 12
-
-    elif 55 < rsi4 <= 62:
-
-        score += 12
-
-    elif 62 < rsi4 <= 70:
-
-        score += 7
+    score += 15
 
 
-    # --------------------------------------------------------
-    # 4H EMA DÖNÜŞ
-    # --------------------------------------------------------
-
-    if ema20_4 > ema20_4_prev:
-
-        score += 15
-
-    elif ema20_4 >= ema20_4_prev * 0.999:
-
-        score += 8
-
-
-    # --------------------------------------------------------
-    # 4H EMA KONUM
-    # --------------------------------------------------------
+    # 4H EMA20
 
     if price >= ema20_4:
 
-        score += 10
+        score += 12
 
-    elif price >= ema20_4 * 0.985:
-
-        score += 7
-
-    elif price >= ema50_4:
-
-        score += 4
-
-
-    # --------------------------------------------------------
-    # 1H TREND
-    # --------------------------------------------------------
-
-    if ema20_1 > ema20_1_prev:
-
-        score += 10
-
-
-    if price >= ema20_1:
+    elif price >= ema20_4 * 0.995:
 
         score += 8
 
-    elif price >= ema20_1 * 0.985:
 
-        score += 4
+    # 4H RSI
 
-
-    # --------------------------------------------------------
-    # 1H RSI
-    # --------------------------------------------------------
-
-    if 42 <= rsi1 <= 60:
-
-        score += 8
-
-    elif 38 <= rsi1 < 42:
-
-        score += 5
-
-    elif 60 < rsi1 <= 68:
-
-        score += 5
-
-
-    # --------------------------------------------------------
-    # 15M MOMENTUM
-    # --------------------------------------------------------
-
-    if price >= ema20_15:
-
-        score += 8
-
-    elif price >= ema20_15 * 0.985:
-
-        score += 5
-
-
-    # --------------------------------------------------------
-    # 15M RSI
-    # --------------------------------------------------------
-
-    if 42 <= rsi15 <= 60:
-
-        score += 7
-
-    elif 38 <= rsi15 < 42:
-
-        score += 5
-
-    elif 60 < rsi15 <= 68:
-
-        score += 4
-
-
-    # --------------------------------------------------------
-    # HACİM
-    # --------------------------------------------------------
-
-    if volume_ratio >= 2.0:
+    if 40 <= rsi4 <= 56:
 
         score += 12
 
-    elif volume_ratio >= 1.5:
-
-        score += 9
-
-    elif volume_ratio >= 1.2:
-
-        score += 6
-
-    elif volume_ratio >= 0.8:
-
-        score += 2
-
-
-    # --------------------------------------------------------
-    # 24H DEĞİŞİM
-    # --------------------------------------------------------
-
-    change = ticker["change"]
-
-
-    # Erken pump için en güzel bölge
-    if -2 <= change <= 8:
+    elif 35 <= rsi4 <= 62:
 
         score += 8
 
-    elif 8 < change <= 15:
 
-        score += 5
+    # Yeşil mum
 
-    elif -8 <= change < -2:
+    if green4 == 3:
+
+        score += 10
+
+    elif green4 == 2:
+
+        score += 7
+
+    else:
 
         score += 4
 
 
-    score = min(
-        score,
-        100
-    )
+    # 1H trend
 
+    if price >= ema20_1:
 
-    # ========================================================
-    # YAPISAL KONTROL
-    # ========================================================
-
-    # Çok aşırı düşen coinleri ele
-    if rsi15 < 28:
-
-        return None
-
-
-    # 24H çoktan uçmuşsa erken pump değildir
-    if change > 60:
-
-        return None
-
-
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
-    if score < MIN_EARLY_SCORE:
-
-        return None
-
-
-    if score >= STRONG_EARLY_SCORE:
-
-        title = "🔥 GÜÇLÜ ERKEN PUMP"
+        score += 12
 
     else:
 
-        title = "🟡 ERKEN PUMP ADAYI"
+        score += 6
+
+
+    # 15M
+
+    if price >= ema20_15:
+
+        score += 10
+
+    else:
+
+        score += 5
+
+
+    # Hacim
+
+    if volume_ratio >= 2:
+
+        score += 10
+
+    elif volume_ratio >= 1.3:
+
+        score += 7
+
+    elif volume_ratio >= 1:
+
+        score += 3
+
+
+    # Momentum
+
+    if momentum15 >= 1.5:
+
+        score += 8
+
+    elif momentum15 >= 0:
+
+        score += 5
 
 
     return {
 
-        "type": "EARLY",
+        "type":
+            "EARLY",
 
-        "title": title,
+        "title":
+            "🟡 ERKEN PUMP ADAYI",
 
-        "symbol": symbol,
+        "symbol":
+            symbol,
 
-        "score": score,
+        "score":
+            min(score, 100),
 
-        "entry": price,
+        "entry":
+            price,
 
-        "change": change,
+        "change":
+            ticker["change"],
 
-        "recovery": recovery,
+        "recovery":
+            recovery,
 
-        "volume_ratio": volume_ratio,
+        "momentum15":
+            momentum15,
 
-        "rsi4h": rsi4,
+        "volume_ratio":
+            volume_ratio,
 
-        "rsi1h": rsi1,
+        "rsi4h":
+            rsi4,
 
-        "rsi15m": rsi15
+        "rsi1h":
+            rsi1,
+
+        "rsi15m":
+            rsi15
     }
 
 
@@ -1440,7 +1265,9 @@ def analyze_drop(
         return None
 
 
-    price = ticker["price"]
+    price = ticker[
+        "price"
+    ]
 
 
     close4 = [
@@ -1448,10 +1275,12 @@ def analyze_drop(
         for x in c4
     ]
 
+
     close1 = [
         x["close"]
         for x in c1
     ]
+
 
     close15 = [
         x["close"]
@@ -1459,13 +1288,19 @@ def analyze_drop(
     ]
 
 
-    ema20_1 = ema(
-        close1,
+    ema20_4 = ema(
+        close4,
         20
     )
 
-    ema20_15 = ema(
-        close15,
+
+    rsi4 = rsi(
+        close4
+    )
+
+
+    ema20_1 = ema(
+        close1,
         20
     )
 
@@ -1474,16 +1309,29 @@ def analyze_drop(
         close1
     )
 
+
+    ema20_15 = ema(
+        close15,
+        20
+    )
+
+
     rsi15 = rsi(
         close15
     )
 
 
     if not all([
+
+        ema20_4,
+        rsi4,
+
         ema20_1,
-        ema20_15,
         rsi1,
+
+        ema20_15,
         rsi15
+
     ]):
 
         return None
@@ -1494,14 +1342,20 @@ def analyze_drop(
     # ========================================================
 
     peak4 = max(
+
         x["high"]
+
         for x in c4[-18:-1]
+
     )
 
 
     peak15 = max(
+
         x["high"]
+
         for x in c15[-17:-1]
+
     )
 
 
@@ -1517,51 +1371,92 @@ def analyze_drop(
 
 
     drop = (
+
         (peak - price)
         / peak
+
     ) * 100
 
 
-    # Çok küçük düşüş
+    # Yeni başlayan düşüş
+
     if drop < 3:
 
         return None
 
 
-    # Çok büyük çöküş
-    if drop > 18:
+    if drop > 16:
 
         return None
 
 
-    # 24H halen pozitif/kuvvetli olmalı
-    if ticker["change"] < 3:
+    # 24H güçlü
+
+    if ticker["change"] < 2:
 
         return None
 
 
     # RSI
-    if rsi15 > 62:
+
+    if rsi15 > 58:
 
         return None
 
 
-    if rsi1 > 68:
+    if rsi1 > 62:
 
         return None
 
 
-    volume_ratio = get_volume_ratio(
-        c15
-    )
+    # Fiyat EMA
 
+    if price > ema20_15 * 1.01:
+
+        return None
+
+
+    # Hacim
+
+    volumes = [
+
+        x["volume"]
+
+        for x in c15[-21:-1]
+
+        if x["volume"] > 0
+
+    ]
+
+
+    if volumes:
+
+        avg_volume = (
+
+            sum(volumes)
+            / len(volumes)
+
+        )
+
+
+        volume_ratio = (
+
+            c15[-1]["volume"]
+            / avg_volume
+
+        )
+
+    else:
+
+        volume_ratio = 0
+
+
+    # ========================================================
+    # SKOR
+    # ========================================================
 
     score = 0
 
-
-    # ========================================================
-    # DÜŞÜŞ MESAFESİ
-    # ========================================================
 
     if 3 <= drop <= 6:
 
@@ -1573,57 +1468,34 @@ def analyze_drop(
 
     elif drop <= 12:
 
-        score += 14
+        score += 12
 
     else:
 
-        score += 7
+        score += 6
 
 
-    # ========================================================
-    # PUMP GÜCÜ
-    # ========================================================
-
-    change = ticker["change"]
-
-
-    if change >= 20:
+    if ticker["change"] >= 10:
 
         score += 20
 
-    elif change >= 12:
+    elif ticker["change"] >= 5:
 
-        score += 17
+        score += 15
 
-    elif change >= 7:
+    else:
 
-        score += 13
+        score += 10
+
+
+    if rsi15 <= 50:
+
+        score += 15
 
     else:
 
         score += 8
 
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    if rsi15 <= 45:
-
-        score += 15
-
-    elif rsi15 <= 52:
-
-        score += 10
-
-    else:
-
-        score += 5
-
-
-    # ========================================================
-    # EMA
-    # ========================================================
 
     if price < ema20_15:
 
@@ -1635,61 +1507,49 @@ def analyze_drop(
         score += 10
 
 
-    # ========================================================
-    # HACİM
-    # ========================================================
-
     if volume_ratio >= 1.5:
 
         score += 10
 
     elif volume_ratio >= 1.1:
 
-        score += 6
-
-    elif volume_ratio >= 0.8:
-
-        score += 2
-
-
-    score = min(
-        score,
-        100
-    )
-
-
-    if score < MIN_DROP_SCORE:
-
-        return None
+        score += 5
 
 
     return {
 
-        "type": "DROP",
+        "type":
+            "DROP",
 
         "title":
             "🔻 PUMP SONRASI DÜŞÜŞ",
 
-        "symbol": symbol,
+        "symbol":
+            symbol,
 
-        "score": score,
+        "score":
+            min(score, 100),
 
-        "entry": price,
+        "entry":
+            price,
 
-        "change": change,
+        "change":
+            ticker["change"],
 
-        "drop": drop,
+        "drop":
+            drop,
 
-        "volume_ratio": volume_ratio,
+        "volume_ratio":
+            volume_ratio,
 
         "rsi4h":
-            rsi(
-                close4
-            ),
+            rsi4,
 
-        "rsi1h": rsi1,
+        "rsi1h":
+            rsi1,
 
-        "rsi15m": rsi15
+        "rsi15m":
+            rsi15
     }
 
 
@@ -1726,14 +1586,17 @@ def analyze_symbol(item):
 
 
         if not candles4:
+
             return []
 
 
         if not candles1:
+
             return []
 
 
         if not candles15:
+
             return []
 
 
@@ -1745,39 +1608,53 @@ def analyze_symbol(item):
         # ====================================================
 
         early = analyze_early(
+
             symbol,
             ticker,
             candles4,
             candles1,
             candles15
+
         )
 
 
         if early:
 
-            results.append(
-                early
-            )
+            if (
+                early["score"]
+                >= MIN_EARLY_SCORE
+            ):
+
+                results.append(
+                    early
+                )
 
 
         # ====================================================
-        # PUMP SONRASI
+        # PUMP SONRASI DÜŞÜŞ
         # ====================================================
 
         drop = analyze_drop(
+
             symbol,
             ticker,
             candles4,
             candles1,
             candles15
+
         )
 
 
         if drop:
 
-            results.append(
-                drop
-            )
+            if (
+                drop["score"]
+                >= MIN_DROP_SCORE
+            ):
+
+                results.append(
+                    drop
+                )
 
 
         return results
@@ -1803,71 +1680,76 @@ def format_signal(x):
     entry = x["entry"]
 
 
+    tp1 = (
+
+        entry
+        * (1 + TP1_PCT / 100)
+
+    )
+
+
+    tp2 = (
+
+        entry
+        * (1 + TP2_PCT / 100)
+
+    )
+
+
+    tp3 = (
+
+        entry
+        * (1 + TP3_PCT / 100)
+
+    )
+
+
+    stop = (
+
+        entry
+        * (1 - STOP_PCT / 100)
+
+    )
+
+
     if x["type"] == "DROP":
 
-        # Düşüş sonrası LONG için
-        # normal TP / STOP
-        tp1 = entry * (
-            1 + TP1_PCT / 100
-        )
-
-        tp2 = entry * (
-            1 + TP2_PCT / 100
-        )
-
-        tp3 = entry * (
-            1 + TP3_PCT / 100
-        )
-
-        stop = entry * (
-            1 - STOP_PCT / 100
-        )
-
-
         extra = (
+
             f"📉 Zirveden düşüş: "
             f"-{x['drop']:.2f}%\n"
-        )
 
+        )
 
     else:
 
-        tp1 = entry * (
-            1 + TP1_PCT / 100
-        )
-
-        tp2 = entry * (
-            1 + TP2_PCT / 100
-        )
-
-        tp3 = entry * (
-            1 + TP3_PCT / 100
-        )
-
-        stop = entry * (
-            1 - STOP_PCT / 100
-        )
-
-
         extra = (
+
             f"📈 4H dipten dönüş: "
             f"+{x['recovery']:.2f}%\n"
+
         )
+
+
+    momentum = x.get(
+        "momentum15",
+        0
+    )
 
 
     return (
 
         f"{x['title']}\n\n"
 
-        f"💎 <b>{x['symbol']}</b>\n"
+        f"💎 {x['symbol']}\n"
 
-        f"🟢 <b>LONG</b>\n"
+        f"🟢 LONG\n"
 
-        f"⭐ <b>Skor: "
-        f"{x['score']}/100</b>\n\n"
+        f"⭐ Skor: "
+        f"{x['score']}/100\n\n"
 
         f"🟢 Giriş: "
-        f"<b>{price_format(entry)}</b>\n"
+        f"{price_format(entry)}\n"
 
         f"🎯 TP1: "
         f"{price_format(tp1)}\n"
@@ -1879,12 +1761,15 @@ def format_signal(x):
         f"{price_format(tp3)}\n"
 
         f"🛑 Stop: "
-        f"{price_format(stop)}</b>\n\n"
+        f"{price_format(stop)}\n\n"
 
         f"📊 24H: "
         f"{x['change']:+.2f}%\n"
 
         f"{extra}"
+
+        f"⚡ 15M momentum: "
+        f"{momentum:+.2f}%\n"
 
         f"⚡ 15M hacim: "
         f"{x['volume_ratio']:.2f}x\n\n"
@@ -1898,10 +1783,10 @@ def format_signal(x):
         f"🔎 15M RSI: "
         f"{x['rsi15m']:.1f}\n\n"
 
-        "📡 <b>MEXC CRYPTO FUTURES</b>\n"
+        f"📡 MEXC CRYPTO FUTURES\n\n"
 
-        "⚠️ <i>Analiz sinyalidir, "
-        "otomatik işlem açmaz.</i>"
+        f"⚠️ Analiz sinyalidir, "
+        f"otomatik işlem açmaz."
     )
 
 
@@ -1922,7 +1807,7 @@ def scan():
 
 
     # ========================================================
-    # CONTRACTS
+    # FUTURES
     # ========================================================
 
     contracts = (
@@ -1939,8 +1824,9 @@ def scan():
 
         send_telegram(
 
-            "🔴 <b>RADAR HATASI</b>\n\n"
+            "🔴 RADAR HATASI\n\n"
             "MEXC Futures kontratları alınamadı."
+
         )
 
 
@@ -1965,8 +1851,9 @@ def scan():
 
         send_telegram(
 
-            "🔴 <b>RADAR HATASI</b>\n\n"
+            "🔴 RADAR HATASI\n\n"
             "MEXC Futures ticker alınamadı."
+
         )
 
 
@@ -2004,47 +1891,42 @@ def scan():
         )
 
 
-        # Hacim
         if volume < MIN_24H_VOLUME:
 
             continue
 
 
-        # Çok düşmüş
         if change < MIN_24H_CHANGE:
 
             continue
 
 
-        # Çok pump olmuş
         if change > MAX_24H_CHANGE:
 
             continue
 
 
-        # Tekrar güvenlik kontrolü
-        if not is_normal_crypto_contract(
-            symbol
-        ):
-
-            continue
-
-
         filtered.append(
+
             (
                 symbol,
                 ticker
             )
+
         )
 
 
     # ========================================================
-    # HACMİ YÜKSEKLER ÖNCE
+    # HACİM SIRALAMASI
     # ========================================================
 
     filtered.sort(
-        key=lambda x: x[1]["volume"],
+
+        key=lambda x:
+            x[1]["volume"],
+
         reverse=True
+
     )
 
 
@@ -2090,7 +1972,9 @@ def scan():
 
 
     with ThreadPoolExecutor(
+
         max_workers=MAX_WORKERS
+
     ) as executor:
 
 
@@ -2100,22 +1984,25 @@ def scan():
         for item in filtered:
 
             future = executor.submit(
+
                 analyze_symbol,
                 item
+
             )
 
 
             futures[future] = item[0]
 
 
-        total = len(
-            futures
-        )
+        total = len(futures)
 
 
         for i, future in enumerate(
+
             as_completed(futures),
+
             1
+
         ):
 
             symbol = futures[
@@ -2140,20 +2027,27 @@ def scan():
             except Exception as e:
 
                 print(
+
                     symbol,
                     "future hata:",
                     e
+
                 )
 
 
             if (
+
                 i % 25 == 0
+
                 or i == total
+
             ):
 
                 print(
+
                     f"İlerleme: "
                     f"{i} / {total}"
+
                 )
 
 
@@ -2182,39 +2076,55 @@ def scan():
 
 
         elif (
+
             candidate["score"]
             > old["score"]
+
         ):
 
             best[symbol] = candidate
 
 
     candidates = sorted(
+
         best.values(),
-        key=lambda x: x["score"],
+
+        key=lambda x:
+            x["score"],
+
         reverse=True
+
     )
 
 
     # ========================================================
-    # SAYIM
+    # İSTATİSTİK
     # ========================================================
 
     early_count = sum(
+
         1
+
         for x in candidates
+
         if x["type"] == "EARLY"
+
     )
 
 
     drop_count = sum(
+
         1
+
         for x in candidates
+
         if x["type"] == "DROP"
+
     )
 
 
     print("")
+
     print(
         "🔥 TOPLAM GÜÇLÜ SİNYAL:",
         len(candidates)
@@ -2234,7 +2144,7 @@ def scan():
 
 
     # ========================================================
-    # SENT DOSYASI
+    # DUPLICATE
     # ========================================================
 
     sent = load_sent()
@@ -2250,9 +2160,12 @@ def scan():
         try:
 
             if (
+
                 now
                 - float(timestamp)
+
                 < DUPLICATE_HOURS * 3600
+
             ):
 
                 clean_sent[key] = timestamp
@@ -2276,8 +2189,10 @@ def scan():
     for candidate in candidates:
 
         if (
+
             sent_count
             >= MAX_SIGNALS_PER_SCAN
+
         ):
 
             break
@@ -2294,16 +2209,20 @@ def scan():
 
 
         duplicate_key = (
+
             f"{signal_type}:"
             f"{symbol}"
+
         )
 
 
         if duplicate_key in sent:
 
             print(
+
                 "⏭ DUPLICATE:",
                 duplicate_key
+
             )
 
             continue
@@ -2335,10 +2254,12 @@ def scan():
 
 
             print(
+
                 "✅ GÖNDERİLDİ:",
                 signal_type,
                 symbol,
                 candidate["score"]
+
             )
 
 
@@ -2371,9 +2292,11 @@ def scan():
 if __name__ == "__main__":
 
     print("")
+
     print(
         "🚀 RADAR BAŞLIYOR"
     )
+
     print("")
 
 
@@ -2391,10 +2314,18 @@ if __name__ == "__main__":
         )
 
 
+    # ========================================================
+    # TELEGRAM TEST
+    # ========================================================
+
     if BOT_TOKEN and CHAT_ID:
 
         telegram_test()
 
+
+    # ========================================================
+    # RADAR
+    # ========================================================
 
     try:
 
@@ -2411,15 +2342,15 @@ if __name__ == "__main__":
 
         send_telegram(
 
-            "🔴 <b>PUMP RADAR ANA HATA</b>\n\n"
+            "🔴 PUMP RADAR ANA HATA\n\n"
 
-            f"<code>"
             f"{str(e)[:500]}"
-            f"</code>"
+
         )
 
 
     print("")
+
     print(
         "🏁 Radar taraması tamamlandı."
     )
