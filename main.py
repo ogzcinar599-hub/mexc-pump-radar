@@ -6,17 +6,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# MEXC FUTURES PUMP RADAR
+# MEXC CRYPTO FUTURES PUMP RADAR
 #
-# SADECE USDT-M FUTURES
+# SADECE KRİPTO FUTURES
 #
 # 4H  = DIP + DÖNÜŞ
 # 1H  = TREND
-# 15M = MOMENTUM
+# 15M = MOMENTUM + HACİM
 #
-# Amaç:
-# Zaten pump olmuş coinleri değil,
-# pump öncesi güç toplamaya başlayan Futures coinlerini bulmak.
+# STOCK / ETF / HİSSE FUTURES HARİÇ
 # ============================================================
 
 
@@ -30,39 +28,34 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # AYARLAR
 # ============================================================
 
-# 100 üzerinden minimum skor
 MIN_SCORE = 72
 
-# Güçlü sinyal seviyesi
 STRONG_SCORE = 82
 
-# Futures 24H minimum işlem hacmi
 MIN_24H_VOLUME = 300000
 
-# 24H değişim
 MIN_24H_CHANGE = -15
 MAX_24H_CHANGE = 12
 
-# Bir taramada maksimum sinyal
 MAX_SIGNALS_PER_SCAN = 3
 
-# Aynı coin tekrar kaç saat gelmesin
 DUPLICATE_HOURS = 6
 
-# TP / STOP
 TP1_PCT = 1.8
 TP2_PCT = 3.5
 TP3_PCT = 5.5
 STOP_PCT = 2.2
 
-# Futures API rate limit için
 MAX_WORKERS = 8
 
-# Hacme göre ilk kaç Futures taransın
 MAX_SYMBOLS_TO_SCAN = 180
 
+# Güçlü alarm için minimum 15M hacim
+STRONG_VOLUME_RATIO = 1.25
+
+
 # ============================================================
-# DOSYALAR
+# DOSYA
 # ============================================================
 
 SENT_FILE = "sent_signals.json"
@@ -75,19 +68,190 @@ SENT_FILE = "sent_signals.json"
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 PumpRadar-Futures/2.0"
+    "User-Agent": "Mozilla/5.0 PumpRadar-CryptoFutures/3.0"
 })
 
 
 # ============================================================
-# SENT SIGNALS
+# STOCK / HİSSE FUTURES
+# ============================================================
+
+# MEXC stock futures tarafında kullanılan bilinen semboller.
+# Liste zamanla genişleyebileceği için ayrıca isim kontrolleri
+# de yapıyoruz.
+
+STOCK_BASES = {
+
+    # Teknoloji
+    "AAPL",
+    "AMD",
+    "NVDA",
+    "INTC",
+    "AVGO",
+    "QCOM",
+    "MU",
+    "MSFT",
+    "GOOGL",
+    "GOOG",
+    "AMZN",
+    "META",
+    "TSLA",
+
+    # Finans
+    "COIN",
+    "HOOD",
+    "JPM",
+    "BAC",
+    "C",
+    "GS",
+    "MS",
+
+    # Tüketici
+    "MCD",
+    "NKE",
+    "SBUX",
+    "WMT",
+    "COST",
+
+    # Diğer büyük hisseler
+    "NFLX",
+    "DIS",
+    "ORCL",
+    "CRM",
+    "UBER",
+    "ABNB",
+    "SHOP",
+    "PLTR",
+    "SNOW",
+    "ROKU",
+
+    # Yeni/çeşitli stock futures
+    "AA",
+    "APH",
+    "STM",
+    "ON",
+    "ENTG",
+    "JBL",
+    "KKR",
+    "VLO",
+    "MPC",
+    "DVN",
+    "BKR",
+    "TSEM",
+    "ROK",
+    "MSTU",
+    "MUSTOCK",
+
+    # Örnek diğer hisse ürünleri
+    "CHYM",
+    "MS"
+}
+
+
+# ============================================================
+# STOCK KONTROL
+# ============================================================
+
+def is_stock_contract(contract):
+
+    symbol = str(
+        contract.get(
+            "symbol",
+            ""
+        )
+    ).upper()
+
+    base = str(
+        contract.get(
+            "baseCoin",
+            ""
+        )
+    ).upper()
+
+    display = str(
+        contract.get(
+            "displayNameEn",
+            ""
+        )
+    ).upper()
+
+    display2 = str(
+        contract.get(
+            "displayName",
+            ""
+        )
+    ).upper()
+
+    combined = (
+        symbol
+        + " "
+        + base
+        + " "
+        + display
+        + " "
+        + display2
+    )
+
+    # --------------------------------------------------------
+    # Direkt bilinen stock base
+    # --------------------------------------------------------
+
+    if base in STOCK_BASES:
+
+        return True
+
+    # --------------------------------------------------------
+    # Stock kelimeleri
+    # --------------------------------------------------------
+
+    stock_words = [
+
+        "STOCK",
+        "EQUITY",
+        "SHARE",
+        "US STOCK"
+    ]
+
+    for word in stock_words:
+
+        if word in combined:
+
+            return True
+
+    # --------------------------------------------------------
+    # Bilinen hisse sembolü + USDT
+    # --------------------------------------------------------
+
+    clean_symbol = (
+        symbol
+        .replace(
+            "_USDT",
+            ""
+        )
+        .replace(
+            "USDT",
+            ""
+        )
+    )
+
+    if clean_symbol in STOCK_BASES:
+
+        return True
+
+    return False
+
+
+# ============================================================
+# SENT
 # ============================================================
 
 def load_sent():
 
     try:
 
-        if os.path.exists(SENT_FILE):
+        if os.path.exists(
+            SENT_FILE
+        ):
 
             with open(
                 SENT_FILE,
@@ -99,7 +263,10 @@ def load_sent():
 
     except Exception as e:
 
-        print("sent_signals okuma hatası:", e)
+        print(
+            "sent okuma hatası:",
+            e
+        )
 
     return {}
 
@@ -123,7 +290,10 @@ def save_sent(data):
 
     except Exception as e:
 
-        print("sent_signals yazma hatası:", e)
+        print(
+            "sent yazma hatası:",
+            e
+        )
 
 
 # ============================================================
@@ -134,18 +304,22 @@ def send_telegram(text):
 
     if not BOT_TOKEN:
 
-        print("❌ TELEGRAM_BOT_TOKEN eksik")
+        print(
+            "❌ TELEGRAM_BOT_TOKEN eksik"
+        )
 
         return False
 
     if not CHAT_ID:
 
-        print("❌ TELEGRAM_CHAT_ID eksik")
+        print(
+            "❌ TELEGRAM_CHAT_ID eksik"
+        )
 
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{BOT_TOKEN}/sendMessage"
     )
 
@@ -175,19 +349,21 @@ def send_telegram(text):
 
         if response.status_code == 200:
 
-            print("✅ Telegram mesajı gönderildi")
+            print(
+                "✅ Telegram mesajı gönderildi"
+            )
 
             return True
 
         print(
-            "❌ Telegram cevap:",
+            "❌ Telegram:",
             response.text[:500]
         )
 
     except Exception as e:
 
         print(
-            "❌ Telegram bağlantı hatası:",
+            "Telegram hata:",
             e
         )
 
@@ -200,35 +376,35 @@ def send_telegram(text):
 
 def telegram_test():
 
-    print("")
-    print("=" * 60)
-    print("TELEGRAM TEST")
-    print("=" * 60)
-
     message = (
+
         "🟢 <b>PUMP RADAR AKTİF</b>\n\n"
 
         "✅ Telegram bağlantısı çalışıyor.\n"
         "✅ GitHub Actions çalışıyor.\n"
         "✅ MEXC Futures bağlantısı çalışıyor.\n\n"
 
+        "🚫 Stock Futures hariç\n"
         "🔎 4H dip + dönüş\n"
         "📈 1H trend\n"
-        "⚡ 15M momentum\n\n"
+        "⚡ 15M momentum + hacim\n\n"
 
-        "🎯 Sadece USDT Futures taranıyor.\n\n"
-
-        "Radar taramaya başladı."
+        "🎯 Crypto Futures taraması başladı."
     )
 
-    return send_telegram(message)
+    return send_telegram(
+        message
+    )
 
 
 # ============================================================
-# GENERIC JSON
+# JSON
 # ============================================================
 
-def get_json(url, params=None):
+def get_json(
+    url,
+    params=None
+):
 
     try:
 
@@ -242,15 +418,12 @@ def get_json(url, params=None):
 
             print(
                 "HTTP hata:",
-                response.status_code,
-                url
+                response.status_code
             )
 
             return None
 
-        data = response.json()
-
-        return data
+        return response.json()
 
     except Exception as e:
 
@@ -263,7 +436,7 @@ def get_json(url, params=None):
 
 
 # ============================================================
-# FUTURES CONTRACTS
+# FUTURES SYMBOLS
 # ============================================================
 
 def get_futures_symbols():
@@ -273,8 +446,6 @@ def get_futures_symbols():
     )
 
     if not data:
-
-        print("❌ Futures contract bilgisi alınamadı.")
 
         return []
 
@@ -292,24 +463,39 @@ def get_futures_symbols():
 
     symbols = []
 
+    stock_count = 0
+
     for contract in contracts:
 
         try:
 
-            symbol = contract.get(
-                "symbol",
-                ""
-            )
+            symbol = str(
+                contract.get(
+                    "symbol",
+                    ""
+                )
+            ).upper()
 
-            quote_coin = contract.get(
-                "quoteCoin",
-                ""
-            )
+            base = str(
+                contract.get(
+                    "baseCoin",
+                    ""
+                )
+            ).upper()
 
-            settle_coin = contract.get(
-                "settleCoin",
-                ""
-            )
+            quote = str(
+                contract.get(
+                    "quoteCoin",
+                    ""
+                )
+            ).upper()
+
+            settle = str(
+                contract.get(
+                    "settleCoin",
+                    ""
+                )
+            ).upper()
 
             state = contract.get(
                 "state",
@@ -322,42 +508,72 @@ def get_futures_symbols():
             )
 
             # ------------------------------------------------
-            # SADECE USDT-M FUTURES
+            # SADECE USDT-M
             # ------------------------------------------------
 
-            if quote_coin != "USDT":
+            if quote != "USDT":
                 continue
 
-            if settle_coin != "USDT":
+            if settle != "USDT":
                 continue
 
-            if not symbol.endswith("_USDT"):
+            if not symbol.endswith(
+                "_USDT"
+            ):
                 continue
 
-            # Aktif sözleşme
+            # ------------------------------------------------
+            # SADECE AKTİF
+            # ------------------------------------------------
+
             if state != 0:
                 continue
 
-            # Gizli ürünleri alma
             if hidden:
                 continue
 
-            symbols.append(symbol)
+            # ------------------------------------------------
+            # STOCK KONTROL
+            # ------------------------------------------------
+
+            if is_stock_contract(
+                contract
+            ):
+
+                stock_count += 1
+
+                print(
+                    "🚫 STOCK ATILDI:",
+                    symbol,
+                    base
+                )
+
+                continue
+
+            symbols.append(
+                symbol
+            )
 
         except Exception:
 
             continue
 
+    print("")
     print(
-        "MEXC USDT Futures:",
+        "🪙 Crypto Futures:",
         len(symbols)
+    )
+
+    print(
+        "🚫 Stock Futures elenen:",
+        stock_count
     )
 
     return symbols
 
 
 # ============================================================
-# FUTURES TICKER
+# FUTURES TICKERS
 # ============================================================
 
 def get_futures_tickers():
@@ -375,7 +591,6 @@ def get_futures_tickers():
         []
     )
 
-    # Tek ticker gelirse
     if isinstance(
         raw,
         dict
@@ -383,23 +598,18 @@ def get_futures_tickers():
 
         raw = [raw]
 
-    if not isinstance(
-        raw,
-        list
-    ):
-
-        return {}
-
     result = {}
 
     for x in raw:
 
         try:
 
-            symbol = x.get(
-                "symbol",
-                ""
-            )
+            symbol = str(
+                x.get(
+                    "symbol",
+                    ""
+                )
+            ).upper()
 
             if not symbol.endswith(
                 "_USDT"
@@ -428,18 +638,15 @@ def get_futures_tickers():
                 )
             )
 
-            rise_fall_rate = float(
+            rate = float(
                 x.get(
                     "riseFallRate",
                     0
                 )
             )
 
-            # MEXC Futures API
-            # riseFallRate değerini decimal verir.
-            # Örn -0.0176 = -1.76%
             change = (
-                rise_fall_rate * 100
+                rate * 100
             )
 
             result[symbol] = {
@@ -451,20 +658,6 @@ def get_futures_tickers():
                 "amount": amount24,
 
                 "change": change,
-
-                "high24": float(
-                    x.get(
-                        "high24Price",
-                        0
-                    )
-                ),
-
-                "low24": float(
-                    x.get(
-                        "lower24Price",
-                        0
-                    )
-                ),
 
                 "funding": float(
                     x.get(
@@ -487,7 +680,7 @@ def get_futures_tickers():
 
 
 # ============================================================
-# FUTURES KLINE
+# KLINES
 # ============================================================
 
 def get_klines(
@@ -511,12 +704,6 @@ def get_klines(
         )
 
         if response.status_code != 200:
-
-            print(
-                "Kline HTTP:",
-                symbol,
-                response.status_code
-            )
 
             return []
 
@@ -560,7 +747,7 @@ def get_klines(
             []
         )
 
-        length = min(
+        n = min(
             len(times),
             len(opens),
             len(closes),
@@ -571,7 +758,7 @@ def get_klines(
 
         candles = []
 
-        for i in range(length):
+        for i in range(n):
 
             try:
 
@@ -606,12 +793,7 @@ def get_klines(
 
                 continue
 
-        # ----------------------------------------------------
-        # Son mum halen açık olabilir.
-        #
-        # Analizde sadece kapanmış mumları kullanıyoruz.
-        # ----------------------------------------------------
-
+        # Açık son mum kullanılmaz
         if len(candles) > 2:
 
             candles = candles[:-1]
@@ -643,19 +825,23 @@ def ema(
 
         return None
 
-    multiplier = 2 / (
-        period + 1
+    multiplier = (
+        2 / (period + 1)
     )
 
-    value = sum(
-        values[:period]
-    ) / period
+    value = (
+        sum(
+            values[:period]
+        )
+        / period
+    )
 
     for price in values[period:]:
 
         value = (
             (
-                price - value
+                price
+                - value
             )
             * multiplier
         ) + value
@@ -745,13 +931,17 @@ def rsi(
         / avg_loss
     )
 
-    return 100 - (
-        100 / (1 + rs)
+    return (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
     )
 
 
 # ============================================================
-# 4H ANA DİP + DÖNÜŞ
+# 4H
 # ============================================================
 
 def analyze_4h(candles):
@@ -766,8 +956,6 @@ def analyze_4h(candles):
     ]
 
     current = closes[-1]
-
-    previous = closes[-2]
 
     ema20 = ema(
         closes,
@@ -798,19 +986,11 @@ def analyze_4h(candles):
 
         return None
 
-    # --------------------------------------------------------
-    # 4H SON 20 MUM DİPİ
-    # --------------------------------------------------------
-
+    # Son 20 kapalı mum
     recent = candles[-21:]
 
     swing_low = min(
         x["low"]
-        for x in recent
-    )
-
-    swing_high = max(
-        x["high"]
         for x in recent
     )
 
@@ -826,92 +1006,45 @@ def analyze_4h(candles):
         / swing_low
     ) * 100
 
-    # Çok fazla yükselmişse
-    # pump zaten başlamış olabilir.
+    # Çoktan pump olmuş coin
     if recovery > 12:
 
         return None
 
-    # --------------------------------------------------------
-    # DİBE UZAKLIK
-    # --------------------------------------------------------
-
-    dip_distance = (
-        (
-            current
-            - swing_low
-        )
-        / swing_low
-    ) * 100
-
-    # --------------------------------------------------------
-    # SON MUM
-    # --------------------------------------------------------
-
-    last = candles[-1]
-
-    body = abs(
-        last["close"]
-        - last["open"]
-    )
-
-    candle_range = (
-        last["high"]
-        - last["low"]
-    )
-
-    if candle_range > 0:
-
-        body_ratio = (
-            body
-            / candle_range
-        )
-
-    else:
-
-        body_ratio = 0
-
-    # --------------------------------------------------------
-    # EMA EĞİMİ
-    # --------------------------------------------------------
-
-    ema_slope = (
-        (
-            ema20
-            - ema20_prev
-        )
-        / ema20_prev
-    ) * 100
-
-    # --------------------------------------------------------
-    # SCORE
-    # --------------------------------------------------------
-
     score = 0
 
-    # Dip bölgesi
-    if 1 <= dip_distance <= 4:
+    # --------------------------------------------------------
+    # DIP
+    # --------------------------------------------------------
+
+    if 1 <= recovery <= 4:
 
         score += 25
 
-    elif 4 < dip_distance <= 7:
+    elif 4 < recovery <= 7:
 
         score += 20
 
-    elif 7 < dip_distance <= 10:
+    elif 7 < recovery <= 10:
 
         score += 12
 
-    elif dip_distance <= 12:
+    elif recovery <= 12:
 
         score += 6
 
-    # EMA20 dönüş
+    # --------------------------------------------------------
+    # EMA DÖNÜŞ
+    # --------------------------------------------------------
+
     if ema20 > ema20_prev:
 
         score += 20
 
-    # Fiyat EMA20'ye yakınsa
+    # --------------------------------------------------------
+    # EMA UZAKLIĞI
+    # --------------------------------------------------------
+
     ema_distance = (
         (
             current
@@ -932,7 +1065,10 @@ def analyze_4h(candles):
 
         score += 8
 
+    # --------------------------------------------------------
     # RSI
+    # --------------------------------------------------------
+
     if 38 <= rsi_now <= 52:
 
         score += 20
@@ -949,12 +1085,37 @@ def analyze_4h(candles):
 
         score += 8
 
-    # Son mum yeşil
+    # --------------------------------------------------------
+    # SON MUM
+    # --------------------------------------------------------
+
+    last = candles[-1]
+
     if last["close"] > last["open"]:
 
         score += 10
 
-    # Mum gövdesi
+    candle_range = (
+        last["high"]
+        - last["low"]
+    )
+
+    body = abs(
+        last["close"]
+        - last["open"]
+    )
+
+    if candle_range > 0:
+
+        body_ratio = (
+            body
+            / candle_range
+        )
+
+    else:
+
+        body_ratio = 0
+
     if body_ratio >= 0.60:
 
         score += 10
@@ -963,7 +1124,7 @@ def analyze_4h(candles):
 
         score += 5
 
-    # Fiyat EMA50 üzerinde ise bonus
+    # EMA50 bonus
     if current > ema50:
 
         score += 5
@@ -977,26 +1138,20 @@ def analyze_4h(candles):
 
         "current": current,
 
+        "rsi": rsi_now,
+
+        "recovery": recovery,
+
         "ema20": ema20,
 
         "ema50": ema50,
 
-        "rsi": rsi_now,
-
-        "swing_low": swing_low,
-
-        "swing_high": swing_high,
-
-        "recovery": recovery,
-
-        "ema_distance": ema_distance,
-
-        "ema_slope": ema_slope
+        "ema_distance": ema_distance
     }
 
 
 # ============================================================
-# 1H TREND
+# 1H
 # ============================================================
 
 def analyze_1h(candles):
@@ -1045,7 +1200,6 @@ def analyze_1h(candles):
 
     score = 0
 
-    # EMA20
     if current >= ema20:
 
         score += 30
@@ -1058,7 +1212,6 @@ def analyze_1h(candles):
 
         score += 10
 
-    # EMA20 slope
     if ema20 > ema20_prev:
 
         score += 25
@@ -1067,7 +1220,6 @@ def analyze_1h(candles):
 
         score += 10
 
-    # EMA50
     if current > ema50:
 
         score += 20
@@ -1076,7 +1228,6 @@ def analyze_1h(candles):
 
         score += 10
 
-    # RSI
     if 48 <= rsi_now <= 65:
 
         score += 20
@@ -1089,7 +1240,6 @@ def analyze_1h(candles):
 
         score += 10
 
-    # Son mum
     if current > previous:
 
         score += 5
@@ -1101,18 +1251,16 @@ def analyze_1h(candles):
             100
         ),
 
-        "current": current,
+        "rsi": rsi_now,
 
         "ema20": ema20,
 
-        "ema50": ema50,
-
-        "rsi": rsi_now
+        "ema50": ema50
     }
 
 
 # ============================================================
-# 15M MOMENTUM
+# 15M
 # ============================================================
 
 def analyze_15m(candles):
@@ -1146,7 +1294,7 @@ def analyze_15m(candles):
 
     score = 0
 
-    # EMA20
+    # EMA
     if current > ema20:
 
         score += 25
@@ -1212,6 +1360,10 @@ def analyze_15m(candles):
 
         volume_ratio = 0
 
+    # --------------------------------------------------------
+    # HACİM PUANI
+    # --------------------------------------------------------
+
     if volume_ratio >= 2.0:
 
         score += 35
@@ -1235,11 +1387,9 @@ def analyze_15m(candles):
             100
         ),
 
-        "current": current,
+        "rsi": rsi_now,
 
         "ema20": ema20,
-
-        "rsi": rsi_now,
 
         "volume_ratio": volume_ratio
     }
@@ -1256,6 +1406,11 @@ def analyze_symbol(
 
     try:
 
+        price = ticker.get(
+            "price",
+            0
+        )
+
         change = ticker.get(
             "change",
             0
@@ -1265,15 +1420,6 @@ def analyze_symbol(
             "amount",
             0
         )
-
-        price = ticker.get(
-            "price",
-            0
-        )
-
-        # ----------------------------------------------------
-        # 24H
-        # ----------------------------------------------------
 
         if price <= 0:
 
@@ -1295,17 +1441,17 @@ def analyze_symbol(
         # 4H
         # ----------------------------------------------------
 
-        candles_4h = get_klines(
+        candles4 = get_klines(
             symbol,
             "Hour4"
         )
 
-        if not candles_4h:
+        if not candles4:
 
             return None
 
         four = analyze_4h(
-            candles_4h
+            candles4
         )
 
         if not four:
@@ -1316,17 +1462,17 @@ def analyze_symbol(
         # 1H
         # ----------------------------------------------------
 
-        candles_1h = get_klines(
+        candles1 = get_klines(
             symbol,
             "Min60"
         )
 
-        if not candles_1h:
+        if not candles1:
 
             return None
 
         one = analyze_1h(
-            candles_1h
+            candles1
         )
 
         if not one:
@@ -1337,17 +1483,17 @@ def analyze_symbol(
         # 15M
         # ----------------------------------------------------
 
-        candles_15m = get_klines(
+        candles15 = get_klines(
             symbol,
             "Min15"
         )
 
-        if not candles_15m:
+        if not candles15:
 
             return None
 
         fifteen = analyze_15m(
-            candles_15m
+            candles15
         )
 
         if not fifteen:
@@ -1355,18 +1501,23 @@ def analyze_symbol(
             return None
 
         # ----------------------------------------------------
-        # AĞIRLIKLI SKOR
+        # AĞIRLIK
         #
-        # 4H  = %50
-        # 1H  = %30
-        # 15M = %20
+        # 4H 50%
+        # 1H 30%
+        # 15M 20%
         # ----------------------------------------------------
 
         score = (
+
             four["score"] * 0.50
+
             +
+
             one["score"] * 0.30
+
             +
+
             fifteen["score"] * 0.20
         )
 
@@ -1374,19 +1525,52 @@ def analyze_symbol(
             score
         )
 
+        # ----------------------------------------------------
+        # ÇOK ÖNEMLİ:
+        # 15M HACİM ÇOK ZAYIFSA
+        # GÜÇLÜ ALARM DEĞİL
+        # ----------------------------------------------------
+
+        volume_ratio = (
+            fifteen[
+                "volume_ratio"
+            ]
+        )
+
+        # ----------------------------------------------------
+        # 72 altı = alma
+        # ----------------------------------------------------
+
         if score < MIN_SCORE:
 
             return None
 
         # ----------------------------------------------------
-        # GİRİŞ
+        # GÜÇLÜ SINIF
+        # ----------------------------------------------------
+
+        if (
+            score >= STRONG_SCORE
+            and
+            volume_ratio >=
+            STRONG_VOLUME_RATIO
+        ):
+
+            signal_type = (
+                "🔥 GÜÇLÜ"
+            )
+
+        else:
+
+            signal_type = (
+                "🟡 ERKEN"
+            )
+
+        # ----------------------------------------------------
+        # Giriş
         # ----------------------------------------------------
 
         entry = price
-
-        # ----------------------------------------------------
-        # TP
-        # ----------------------------------------------------
 
         tp1 = (
             entry
@@ -1412,10 +1596,6 @@ def analyze_symbol(
             )
         )
 
-        # ----------------------------------------------------
-        # STOP
-        # ----------------------------------------------------
-
         stop = (
             entry
             * (
@@ -1423,18 +1603,6 @@ def analyze_symbol(
                 - STOP_PCT / 100
             )
         )
-
-        # ----------------------------------------------------
-        # SIGNAL TYPE
-        # ----------------------------------------------------
-
-        if score >= STRONG_SCORE:
-
-            signal_type = "🔥 GÜÇLÜ"
-
-        else:
-
-            signal_type = "🟡 ERKEN ADAY"
 
         return {
 
@@ -1456,37 +1624,49 @@ def analyze_symbol(
 
             "change": change,
 
-            "volume": volume,
-
-            "recovery": four["recovery"],
-
-            "rsi4h": four["rsi"],
-
-            "rsi1h": one["rsi"],
-
-            "rsi15m": fifteen["rsi"],
-
-            "score4h": four["score"],
-
-            "score1h": one["score"],
-
-            "score15m": fifteen["score"],
-
-            "volume_ratio": fifteen[
-                "volume_ratio"
+            "recovery": four[
+                "recovery"
             ],
 
-            "funding": ticker.get(
-                "funding",
-                0
-            )
+            "rsi4h": four[
+                "rsi"
+            ],
+
+            "rsi1h": one[
+                "rsi"
+            ],
+
+            "rsi15m": fifteen[
+                "rsi"
+            ],
+
+            "score4h": four[
+                "score"
+            ],
+
+            "score1h": one[
+                "score"
+            ],
+
+            "score15m": fifteen[
+                "score"
+            ],
+
+            "volume_ratio":
+                volume_ratio,
+
+            "funding":
+                ticker.get(
+                    "funding",
+                    0
+                )
         }
 
     except Exception as e:
 
         print(
             symbol,
-            "analiz hatası:",
+            "analiz hata:",
             e
         )
 
@@ -1494,10 +1674,12 @@ def analyze_symbol(
 
 
 # ============================================================
-# FİYAT FORMAT
+# FİYAT
 # ============================================================
 
-def price_format(price):
+def price_format(
+    price
+):
 
     if price >= 100:
 
@@ -1519,18 +1701,34 @@ def price_format(price):
 
 
 # ============================================================
-# TELEGRAM SIGNAL
+# SIGNAL MESAJ
 # ============================================================
 
 def format_signal(x):
 
+    if (
+        x["signal_type"]
+        == "🔥 GÜÇLÜ"
+    ):
+
+        title = (
+            "🔥 <b>GÜÇLÜ PUMP ADAYI</b>"
+        )
+
+    else:
+
+        title = (
+            "🟡 <b>ERKEN PUMP ADAYI</b>"
+        )
+
     return (
 
-        f"{x['signal_type']} "
-        "<b>PUMP ADAYI</b>\n\n"
+        f"{title}\n\n"
 
         f"🪙 <b>{x['symbol']}</b>\n"
-        f"⭐ <b>Skor: {x['score']}/100</b>\n\n"
+
+        f"⭐ <b>Skor: "
+        f"{x['score']}/100</b>\n\n"
 
         f"🟢 <b>Giriş:</b> "
         f"{price_format(x['entry'])}\n"
@@ -1550,7 +1748,7 @@ def format_signal(x):
         f"📊 24H: "
         f"{x['change']:+.2f}%\n"
 
-        f"📉 4H dipten dönüş: "
+        f"📉 4H dönüş: "
         f"+{x['recovery']:.2f}%\n"
 
         f"⚡ 15M hacim: "
@@ -1565,11 +1763,17 @@ def format_signal(x):
         f"🔎 15M RSI: "
         f"{x['rsi15m']:.1f}\n\n"
 
-        f"📌 4H: {x['score4h']}/100\n"
-        f"📈 1H: {x['score1h']}/100\n"
-        f"⚡ 15M: {x['score15m']}/100\n\n"
+        f"📌 4H: "
+        f"{x['score4h']}/100\n"
 
-        "📡 <b>MEXC FUTURES</b>\n"
+        f"📈 1H: "
+        f"{x['score1h']}/100\n"
+
+        f"⚡ 15M: "
+        f"{x['score15m']}/100\n\n"
+
+        "📡 <b>MEXC CRYPTO FUTURES</b>\n"
+
         "⚠️ <i>Analiz sinyalidir, "
         "otomatik işlem açmaz.</i>"
     )
@@ -1583,24 +1787,23 @@ def scan():
 
     print("")
     print("=" * 70)
-    print("🚀 MEXC FUTURES PUMP RADAR BAŞLADI")
+    print(
+        "🚀 MEXC CRYPTO FUTURES "
+        "PUMP RADAR"
+    )
     print("=" * 70)
 
     # --------------------------------------------------------
-    # FUTURES CONTRACTS
+    # FUTURES
     # --------------------------------------------------------
 
     symbols = get_futures_symbols()
 
     if not symbols:
 
-        print(
-            "❌ Futures sembolleri alınamadı."
-        )
-
         send_telegram(
-            "🔴 <b>PUMP RADAR HATASI</b>\n\n"
-            "MEXC Futures listesi alınamadı."
+            "🔴 <b>RADAR HATASI</b>\n\n"
+            "Crypto Futures listesi alınamadı."
         )
 
         return
@@ -1613,19 +1816,15 @@ def scan():
 
     if not tickers:
 
-        print(
-            "❌ Futures ticker alınamadı."
-        )
-
         send_telegram(
-            "🔴 <b>PUMP RADAR HATASI</b>\n\n"
-            "MEXC Futures ticker alınamadı."
+            "🔴 <b>RADAR HATASI</b>\n\n"
+            "Futures ticker alınamadı."
         )
 
         return
 
     # --------------------------------------------------------
-    # 24H ÖN FİLTRE
+    # ÖN FİLTRE
     # --------------------------------------------------------
 
     filtered = []
@@ -1640,8 +1839,8 @@ def scan():
 
             continue
 
-        volume = ticker.get(
-            "amount",
+        price = ticker.get(
+            "price",
             0
         )
 
@@ -1650,8 +1849,8 @@ def scan():
             0
         )
 
-        price = ticker.get(
-            "price",
+        volume = ticker.get(
+            "amount",
             0
         )
 
@@ -1678,43 +1877,41 @@ def scan():
             )
         )
 
-    # --------------------------------------------------------
-    # HACME GÖRE SIRALA
-    # --------------------------------------------------------
-
+    # Hacme göre sırala
     filtered.sort(
-        key=lambda x: x[1].get(
+        key=lambda x:
+        x[1].get(
             "amount",
             0
         ),
         reverse=True
     )
 
-    # Sadece ilk X coin
     filtered = filtered[
         :MAX_SYMBOLS_TO_SCAN
     ]
 
+    print("")
     print(
-        "Futures 24H filtre sonrası:",
+        "24H filtre sonrası:",
         len(filtered)
     )
 
     print(
-        "Taranacak maksimum coin:",
-        MAX_SYMBOLS_TO_SCAN
+        "Taranacak coin:",
+        len(filtered)
     )
 
     if not filtered:
 
         print(
-            "❌ 24H filtreyi geçen Futures yok."
+            "❌ Uygun coin yok."
         )
 
         return
 
     # --------------------------------------------------------
-    # PARALEL TARAMA
+    # PARALEL
     # --------------------------------------------------------
 
     candidates = []
@@ -1733,16 +1930,23 @@ def scan():
                 ticker
             )
 
-            futures[future] = symbol
+            futures[
+                future
+            ] = symbol
 
         completed = 0
-        total = len(futures)
+
+        total = len(
+            futures
+        )
 
         for future in as_completed(
             futures
         ):
 
-            symbol = futures[future]
+            symbol = futures[
+                future
+            ]
 
             completed += 1
 
@@ -1759,14 +1963,16 @@ def scan():
                     print(
                         "🔥 ADAY:",
                         symbol,
-                        "| SKOR:",
+                        "|",
                         result["score"],
-                        "| 4H:",
+                        "| 4H",
                         result["score4h"],
-                        "| 1H:",
+                        "| 1H",
                         result["score1h"],
-                        "| 15M:",
-                        result["score15m"]
+                        "| 15M",
+                        result["score15m"],
+                        "| VOL",
+                        f"{result['volume_ratio']:.2f}x"
                     )
 
             except Exception as e:
@@ -1777,7 +1983,10 @@ def scan():
                     e
                 )
 
-            if completed % 25 == 0:
+            if (
+                completed % 25
+                == 0
+            ):
 
                 print(
                     "İlerleme:",
@@ -1787,23 +1996,41 @@ def scan():
                 )
 
     # --------------------------------------------------------
-    # SKORA GÖRE SIRALA
+    # SIRALA
     # --------------------------------------------------------
 
     candidates.sort(
-        key=lambda x: x["score"],
+        key=lambda x:
+        (
+            x["signal_type"]
+            == "🔥 GÜÇLÜ",
+            x["score"],
+            x["volume_ratio"]
+        ),
         reverse=True
     )
 
     print("")
     print(
-        "🎯 TOPLAM ADAY:",
+        "🎯 ADAY SAYISI:",
         len(candidates)
     )
 
     # --------------------------------------------------------
-    # ADAY YOK
+    # EN İYİLER
     # --------------------------------------------------------
+
+    for x in candidates[:10]:
+
+        print(
+            x["symbol"],
+            "|",
+            x["signal_type"],
+            "|",
+            x["score"],
+            "| 15M",
+            f"{x['volume_ratio']:.2f}x"
+        )
 
     if not candidates:
 
@@ -1814,28 +2041,7 @@ def scan():
         return
 
     # --------------------------------------------------------
-    # EN İYİ ADAYLARI GÖSTER
-    # --------------------------------------------------------
-
-    print("")
-    print("EN İYİ ADAYLAR:")
-
-    for candidate in candidates[:10]:
-
-        print(
-            candidate["symbol"],
-            "|",
-            candidate["score"],
-            "| 4H",
-            candidate["score4h"],
-            "| 1H",
-            candidate["score1h"],
-            "| 15M",
-            candidate["score15m"]
-        )
-
-    # --------------------------------------------------------
-    # DUPLICATE TEMİZLE
+    # DUPLICATE
     # --------------------------------------------------------
 
     sent = load_sent()
@@ -1871,7 +2077,33 @@ def scan():
 
     sent_count = 0
 
-    for candidate in candidates:
+    # Önce güçlüler
+    strong = [
+
+        x for x in candidates
+
+        if (
+            x["signal_type"]
+            == "🔥 GÜÇLÜ"
+        )
+    ]
+
+    early = [
+
+        x for x in candidates
+
+        if (
+            x["signal_type"]
+            != "🔥 GÜÇLÜ"
+        )
+    ]
+
+    ordered = (
+        strong
+        + early
+    )
+
+    for candidate in ordered:
 
         if (
             sent_count
@@ -1903,7 +2135,9 @@ def scan():
 
         if success:
 
-            sent[symbol] = now
+            sent[
+                symbol
+            ] = now
 
             save_sent(
                 sent
@@ -1919,7 +2153,7 @@ def scan():
 
     print("")
     print(
-        "📨 Telegram gönderilen:",
+        "📨 Gönderilen:",
         sent_count
     )
 
@@ -1933,12 +2167,11 @@ def scan():
 if __name__ == "__main__":
 
     print("")
-    print("🚀 PUMP RADAR FUTURES BAŞLIYOR")
+    print(
+        "🚀 CRYPTO FUTURES "
+        "PUMP RADAR BAŞLIYOR"
+    )
     print("")
-
-    # --------------------------------------------------------
-    # TELEGRAM TEST
-    # --------------------------------------------------------
 
     if not BOT_TOKEN:
 
@@ -1952,7 +2185,10 @@ if __name__ == "__main__":
             "❌ TELEGRAM_CHAT_ID YOK"
         )
 
-    if BOT_TOKEN and CHAT_ID:
+    if (
+        BOT_TOKEN
+        and CHAT_ID
+    ):
 
         telegram_test()
 
@@ -1961,10 +2197,6 @@ if __name__ == "__main__":
         print(
             "❌ Telegram secretları eksik."
         )
-
-    # --------------------------------------------------------
-    # TARAMA
-    # --------------------------------------------------------
 
     try:
 
@@ -1978,9 +2210,11 @@ if __name__ == "__main__":
         )
 
         send_telegram(
-            "🔴 <b>PUMP RADAR ANA HATA</b>\n\n"
+            "🔴 <b>RADAR ANA HATA</b>\n\n"
             f"<code>{str(e)[:500]}</code>"
         )
 
     print("")
-    print("🏁 Futures radar taraması tamamlandı.")
+    print(
+        "🏁 Radar tamamlandı."
+    )
