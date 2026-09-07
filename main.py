@@ -6,15 +6,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# MEXC PUMP RADAR
+# MEXC FUTURES PUMP RADAR
 #
-# 4H  = DIP + DÖNÜŞ ANA FİLTRESİ
-# 1H  = TREND TEYİDİ
-# 15M = MOMENTUM TEYİDİ
+# SADECE USDT-M FUTURES
 #
-# AMAÇ:
+# 4H  = DIP + DÖNÜŞ
+# 1H  = TREND
+# 15M = MOMENTUM
+#
+# Amaç:
 # Zaten pump olmuş coinleri değil,
-# 4H dipten yeni dönmeye başlayan coinleri bulmak.
+# pump öncesi güç toplamaya başlayan Futures coinlerini bulmak.
 # ============================================================
 
 
@@ -28,18 +30,23 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # AYARLAR
 # ============================================================
 
-MIN_SCORE = 88
+# 100 üzerinden minimum skor
+MIN_SCORE = 72
 
-MIN_24H_VOLUME = 500000
+# Güçlü sinyal seviyesi
+STRONG_SCORE = 82
 
-# 24 saatlik değişim
-MIN_24H_CHANGE = -12
-MAX_24H_CHANGE = 15
+# Futures 24H minimum işlem hacmi
+MIN_24H_VOLUME = 300000
+
+# 24H değişim
+MIN_24H_CHANGE = -15
+MAX_24H_CHANGE = 12
 
 # Bir taramada maksimum sinyal
 MAX_SIGNALS_PER_SCAN = 3
 
-# Duplicate süresi
+# Aynı coin tekrar kaç saat gelmesin
 DUPLICATE_HOURS = 6
 
 # TP / STOP
@@ -48,11 +55,14 @@ TP2_PCT = 3.5
 TP3_PCT = 5.5
 STOP_PCT = 2.2
 
-# Paralel işlem
-MAX_WORKERS = 20
+# Futures API rate limit için
+MAX_WORKERS = 8
+
+# Hacme göre ilk kaç Futures taransın
+MAX_SYMBOLS_TO_SCAN = 180
 
 # ============================================================
-# DOSYA
+# DOSYALAR
 # ============================================================
 
 SENT_FILE = "sent_signals.json"
@@ -65,7 +75,7 @@ SENT_FILE = "sent_signals.json"
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 PumpRadar/1.0"
+    "User-Agent": "Mozilla/5.0 PumpRadar-Futures/2.0"
 })
 
 
@@ -171,7 +181,7 @@ def send_telegram(text):
 
         print(
             "❌ Telegram cevap:",
-            response.text
+            response.text[:500]
         )
 
     except Exception as e:
@@ -197,11 +207,17 @@ def telegram_test():
 
     message = (
         "🟢 <b>PUMP RADAR AKTİF</b>\n\n"
+
         "✅ Telegram bağlantısı çalışıyor.\n"
-        "✅ GitHub Actions çalışıyor.\n\n"
+        "✅ GitHub Actions çalışıyor.\n"
+        "✅ MEXC Futures bağlantısı çalışıyor.\n\n"
+
         "🔎 4H dip + dönüş\n"
-        "📈 1H trend teyidi\n"
-        "⚡ 15M momentum teyidi\n\n"
+        "📈 1H trend\n"
+        "⚡ 15M momentum\n\n"
+
+        "🎯 Sadece USDT Futures taranıyor.\n\n"
+
         "Radar taramaya başladı."
     )
 
@@ -216,23 +232,25 @@ def get_json(url, params=None):
 
     try:
 
-        r = session.get(
+        response = session.get(
             url,
             params=params,
-            timeout=12
+            timeout=15
         )
 
-        if r.status_code != 200:
+        if response.status_code != 200:
 
             print(
                 "HTTP hata:",
-                r.status_code,
+                response.status_code,
                 url
             )
 
             return None
 
-        return r.json()
+        data = response.json()
+
+        return data
 
     except Exception as e:
 
@@ -245,133 +263,136 @@ def get_json(url, params=None):
 
 
 # ============================================================
-# SYMBOLLER
+# FUTURES CONTRACTS
 # ============================================================
 
-def get_usdt_symbols():
+def get_futures_symbols():
 
     data = get_json(
-        f"{BASE}/api/v3/exchangeInfo"
+        f"{BASE}/api/v1/contract/detail"
     )
 
     if not data:
+
+        print("❌ Futures contract bilgisi alınamadı.")
+
+        return []
+
+    contracts = data.get(
+        "data",
+        []
+    )
+
+    if not isinstance(
+        contracts,
+        list
+    ):
 
         return []
 
     symbols = []
 
-    bad_symbols = {
-        "USDCUSDT",
-        "FDUSDUSDT",
-        "TUSDUSDT",
-        "DAIUSDT",
-        "USDEUSDT",
-        "USD1USDT"
-    }
-
-    for s in data.get("symbols", []):
-
-        symbol = s.get(
-            "symbol",
-            ""
-        )
-
-        status = s.get(
-            "status",
-            ""
-        )
-
-        if not symbol.endswith("USDT"):
-            continue
-
-        if symbol in bad_symbols:
-            continue
-
-        # MEXC farklı API sürümlerinde
-        # farklı status döndürebiliyor.
-        if status:
-            if str(status) not in (
-                "1",
-                "TRADING"
-            ):
-                continue
-
-        symbols.append(symbol)
-
-    return symbols
-
-
-# ============================================================
-# KLINE
-# ============================================================
-
-def get_klines(
-    symbol,
-    interval,
-    limit=100
-):
-
-    data = get_json(
-        f"{BASE}/api/v3/klines",
-        {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
-    )
-
-    if not data:
-        return []
-
-    if not isinstance(data, list):
-        return []
-
-    candles = []
-
-    for x in data:
+    for contract in contracts:
 
         try:
 
-            candles.append({
+            symbol = contract.get(
+                "symbol",
+                ""
+            )
 
-                "open": float(x[1]),
+            quote_coin = contract.get(
+                "quoteCoin",
+                ""
+            )
 
-                "high": float(x[2]),
+            settle_coin = contract.get(
+                "settleCoin",
+                ""
+            )
 
-                "low": float(x[3]),
+            state = contract.get(
+                "state",
+                99
+            )
 
-                "close": float(x[4]),
+            hidden = contract.get(
+                "isHidden",
+                False
+            )
 
-                "volume": float(x[5])
+            # ------------------------------------------------
+            # SADECE USDT-M FUTURES
+            # ------------------------------------------------
 
-            })
+            if quote_coin != "USDT":
+                continue
+
+            if settle_coin != "USDT":
+                continue
+
+            if not symbol.endswith("_USDT"):
+                continue
+
+            # Aktif sözleşme
+            if state != 0:
+                continue
+
+            # Gizli ürünleri alma
+            if hidden:
+                continue
+
+            symbols.append(symbol)
 
         except Exception:
 
             continue
 
-    return candles
+    print(
+        "MEXC USDT Futures:",
+        len(symbols)
+    )
+
+    return symbols
 
 
 # ============================================================
-# 24H TICKER
+# FUTURES TICKER
 # ============================================================
 
-def get_24h():
+def get_futures_tickers():
 
     data = get_json(
-        f"{BASE}/api/v3/ticker/24hr"
+        f"{BASE}/api/v1/contract/ticker"
     )
+
+    if not data:
+
+        return {}
+
+    raw = data.get(
+        "data",
+        []
+    )
+
+    # Tek ticker gelirse
+    if isinstance(
+        raw,
+        dict
+    ):
+
+        raw = [raw]
+
+    if not isinstance(
+        raw,
+        list
+    ):
+
+        return {}
 
     result = {}
 
-    if not data:
-        return result
-
-    if isinstance(data, dict):
-        data = [data]
-
-    for x in data:
+    for x in raw:
 
         try:
 
@@ -380,28 +401,74 @@ def get_24h():
                 ""
             )
 
-            if not symbol.endswith("USDT"):
+            if not symbol.endswith(
+                "_USDT"
+            ):
+
                 continue
+
+            price = float(
+                x.get(
+                    "lastPrice",
+                    0
+                )
+            )
+
+            volume24 = float(
+                x.get(
+                    "volume24",
+                    0
+                )
+            )
+
+            amount24 = float(
+                x.get(
+                    "amount24",
+                    0
+                )
+            )
+
+            rise_fall_rate = float(
+                x.get(
+                    "riseFallRate",
+                    0
+                )
+            )
+
+            # MEXC Futures API
+            # riseFallRate değerini decimal verir.
+            # Örn -0.0176 = -1.76%
+            change = (
+                rise_fall_rate * 100
+            )
 
             result[symbol] = {
 
-                "price": float(
+                "price": price,
+
+                "volume": volume24,
+
+                "amount": amount24,
+
+                "change": change,
+
+                "high24": float(
                     x.get(
-                        "lastPrice",
+                        "high24Price",
                         0
                     )
                 ),
 
-                "change": float(
+                "low24": float(
                     x.get(
-                        "priceChangePercent",
+                        "lower24Price",
                         0
                     )
                 ),
 
-                "volume": float(
+                "funding": float(
                     x.get(
-                        "quoteVolume",
+                        "fundingRate",
                         0
                     )
                 )
@@ -411,34 +478,189 @@ def get_24h():
 
             continue
 
+    print(
+        "Futures ticker:",
+        len(result)
+    )
+
     return result
+
+
+# ============================================================
+# FUTURES KLINE
+# ============================================================
+
+def get_klines(
+    symbol,
+    interval
+):
+
+    try:
+
+        url = (
+            f"{BASE}/api/v1/contract/"
+            f"kline/{symbol}"
+        )
+
+        response = session.get(
+            url,
+            params={
+                "interval": interval
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "Kline HTTP:",
+                symbol,
+                response.status_code
+            )
+
+            return []
+
+        result = response.json()
+
+        data = result.get(
+            "data"
+        )
+
+        if not data:
+
+            return []
+
+        times = data.get(
+            "time",
+            []
+        )
+
+        opens = data.get(
+            "open",
+            []
+        )
+
+        closes = data.get(
+            "close",
+            []
+        )
+
+        highs = data.get(
+            "high",
+            []
+        )
+
+        lows = data.get(
+            "low",
+            []
+        )
+
+        volumes = data.get(
+            "vol",
+            []
+        )
+
+        length = min(
+            len(times),
+            len(opens),
+            len(closes),
+            len(highs),
+            len(lows),
+            len(volumes)
+        )
+
+        candles = []
+
+        for i in range(length):
+
+            try:
+
+                candles.append({
+
+                    "time": int(
+                        times[i]
+                    ),
+
+                    "open": float(
+                        opens[i]
+                    ),
+
+                    "close": float(
+                        closes[i]
+                    ),
+
+                    "high": float(
+                        highs[i]
+                    ),
+
+                    "low": float(
+                        lows[i]
+                    ),
+
+                    "volume": float(
+                        volumes[i]
+                    )
+                })
+
+            except Exception:
+
+                continue
+
+        # ----------------------------------------------------
+        # Son mum halen açık olabilir.
+        #
+        # Analizde sadece kapanmış mumları kullanıyoruz.
+        # ----------------------------------------------------
+
+        if len(candles) > 2:
+
+            candles = candles[:-1]
+
+        return candles
+
+    except Exception as e:
+
+        print(
+            "Kline hata:",
+            symbol,
+            interval,
+            e
+        )
+
+        return []
 
 
 # ============================================================
 # EMA
 # ============================================================
 
-def ema(values, period):
+def ema(
+    values,
+    period
+):
 
     if len(values) < period:
+
         return None
 
     multiplier = 2 / (
         period + 1
     )
 
-    ema_value = sum(
+    value = sum(
         values[:period]
     ) / period
 
     for price in values[period:]:
 
-        ema_value = (
-            (price - ema_value)
+        value = (
+            (
+                price - value
+            )
             * multiplier
-        ) + ema_value
+        ) + value
 
-    return ema_value
+    return value
 
 
 # ============================================================
@@ -451,6 +673,7 @@ def rsi(
 ):
 
     if len(values) < period + 1:
+
         return None
 
     gains = []
@@ -479,12 +702,16 @@ def rsi(
             )
 
     avg_gain = (
-        sum(gains[:period])
+        sum(
+            gains[:period]
+        )
         / period
     )
 
     avg_loss = (
-        sum(losses[:period])
+        sum(
+            losses[:period]
+        )
         / period
     )
 
@@ -510,6 +737,7 @@ def rsi(
         ) / period
 
     if avg_loss == 0:
+
         return 100
 
     rs = (
@@ -523,12 +751,13 @@ def rsi(
 
 
 # ============================================================
-# 4H DIP + DÖNÜŞ
+# 4H ANA DİP + DÖNÜŞ
 # ============================================================
 
 def analyze_4h(candles):
 
     if len(candles) < 60:
+
         return None
 
     closes = [
@@ -537,6 +766,7 @@ def analyze_4h(candles):
     ]
 
     current = closes[-1]
+
     previous = closes[-2]
 
     ema20 = ema(
@@ -544,14 +774,14 @@ def analyze_4h(candles):
         20
     )
 
-    ema20_prev = ema(
-        closes[:-1],
-        20
-    )
-
     ema50 = ema(
         closes,
         50
+    )
+
+    ema20_prev = ema(
+        closes[:-1],
+        20
     )
 
     rsi_now = rsi(
@@ -561,147 +791,189 @@ def analyze_4h(candles):
 
     if not all([
         ema20,
-        ema20_prev,
         ema50,
+        ema20_prev,
         rsi_now
     ]):
+
         return None
 
     # --------------------------------------------------------
-    # SON 12 TAMAMLANMIŞ 4H MUMUNUN DİBİ
+    # 4H SON 20 MUM DİPİ
     # --------------------------------------------------------
 
-    recent = candles[-13:-1]
+    recent = candles[-21:]
 
     swing_low = min(
         x["low"]
         for x in recent
     )
 
+    swing_high = max(
+        x["high"]
+        for x in recent
+    )
+
     if swing_low <= 0:
+
         return None
 
     recovery = (
-        (current - swing_low)
+        (
+            current
+            - swing_low
+        )
         / swing_low
     ) * 100
 
-    # Dipten yeni dönüş
-    if recovery < 1.0:
-        return None
-
-    # Çok yükselmiş coin = pump başlamış olabilir
+    # Çok fazla yükselmişse
+    # pump zaten başlamış olabilir.
     if recovery > 12:
+
         return None
 
     # --------------------------------------------------------
-    # SON 3 MUM
+    # DİBE UZAKLIK
     # --------------------------------------------------------
 
-    last3 = candles[-3:]
-
-    green_count = sum(
-        1
-        for x in last3
-        if x["close"] > x["open"]
-    )
-
-    # En az 2 yeşil
-    if green_count < 2:
-        return None
-
-    # --------------------------------------------------------
-    # EMA20 YUKARI DÖNÜYOR MU?
-    # --------------------------------------------------------
-
-    ema_rising = (
-        ema20 > ema20_prev
-    )
-
-    if not ema_rising:
-        return None
-
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
-
-    if rsi_now < 35:
-        return None
-
-    if rsi_now > 62:
-        return None
-
-    # --------------------------------------------------------
-    # FİYAT - EMA20
-    # --------------------------------------------------------
-
-    ema_distance = (
-        (current - ema20)
-        / ema20
+    dip_distance = (
+        (
+            current
+            - swing_low
+        )
+        / swing_low
     ) * 100
 
-    if ema_distance < -3:
-        return None
+    # --------------------------------------------------------
+    # SON MUM
+    # --------------------------------------------------------
 
-    if ema_distance > 8:
-        return None
+    last = candles[-1]
+
+    body = abs(
+        last["close"]
+        - last["open"]
+    )
+
+    candle_range = (
+        last["high"]
+        - last["low"]
+    )
+
+    if candle_range > 0:
+
+        body_ratio = (
+            body
+            / candle_range
+        )
+
+    else:
+
+        body_ratio = 0
 
     # --------------------------------------------------------
-    # 4H SCORE
+    # EMA EĞİMİ
+    # --------------------------------------------------------
+
+    ema_slope = (
+        (
+            ema20
+            - ema20_prev
+        )
+        / ema20_prev
+    ) * 100
+
+    # --------------------------------------------------------
+    # SCORE
     # --------------------------------------------------------
 
     score = 0
 
-    # Dipten dönüş
-    if 1 <= recovery <= 5:
+    # Dip bölgesi
+    if 1 <= dip_distance <= 4:
+
+        score += 25
+
+    elif 4 < dip_distance <= 7:
+
         score += 20
 
-    elif 5 < recovery <= 8:
-        score += 15
+    elif 7 < dip_distance <= 10:
 
-    else:
-        score += 8
+        score += 12
 
-    # EMA dönüş
-    score += 15
-
-    # EMA20 geri alınmış
-    if current >= ema20:
-
-        score += 15
-
-    elif current >= ema20 * 0.995:
-
-        score += 10
-
-    # RSI
-    if 40 <= rsi_now <= 55:
-
-        score += 15
-
-    elif 35 <= rsi_now < 40:
-
-        score += 10
-
-    elif 55 < rsi_now <= 62:
-
-        score += 8
-
-    # Son mum pozitif
-    if current > previous:
-
-        score += 10
-
-    # Yeşil mumlar
-    if green_count == 3:
-
-        score += 10
-
-    elif green_count == 2:
+    elif dip_distance <= 12:
 
         score += 6
 
+    # EMA20 dönüş
+    if ema20 > ema20_prev:
+
+        score += 20
+
+    # Fiyat EMA20'ye yakınsa
+    ema_distance = (
+        (
+            current
+            - ema20
+        )
+        / ema20
+    ) * 100
+
+    if -1.5 <= ema_distance <= 3:
+
+        score += 15
+
+    elif -3 <= ema_distance < -1.5:
+
+        score += 10
+
+    elif 3 < ema_distance <= 6:
+
+        score += 8
+
+    # RSI
+    if 38 <= rsi_now <= 52:
+
+        score += 20
+
+    elif 52 < rsi_now <= 58:
+
+        score += 15
+
+    elif 34 <= rsi_now < 38:
+
+        score += 10
+
+    elif 58 < rsi_now <= 62:
+
+        score += 8
+
+    # Son mum yeşil
+    if last["close"] > last["open"]:
+
+        score += 10
+
+    # Mum gövdesi
+    if body_ratio >= 0.60:
+
+        score += 10
+
+    elif body_ratio >= 0.35:
+
+        score += 5
+
+    # Fiyat EMA50 üzerinde ise bonus
+    if current > ema50:
+
+        score += 5
+
     return {
+
+        "score": min(
+            score,
+            100
+        ),
 
         "current": current,
 
@@ -713,9 +985,13 @@ def analyze_4h(candles):
 
         "swing_low": swing_low,
 
+        "swing_high": swing_high,
+
         "recovery": recovery,
 
-        "score": score
+        "ema_distance": ema_distance,
+
+        "ema_slope": ema_slope
     }
 
 
@@ -726,6 +1002,7 @@ def analyze_4h(candles):
 def analyze_1h(candles):
 
     if len(candles) < 60:
+
         return None
 
     closes = [
@@ -734,6 +1011,7 @@ def analyze_1h(candles):
     ]
 
     current = closes[-1]
+
     previous = closes[-2]
 
     ema20 = ema(
@@ -762,58 +1040,66 @@ def analyze_1h(candles):
         ema20_prev,
         rsi_now
     ]):
+
         return None
 
     score = 0
 
-    # EMA20 üstü
+    # EMA20
     if current >= ema20:
+
+        score += 30
+
+    elif current >= ema20 * 0.997:
 
         score += 20
 
-    elif current >= ema20 * 0.995:
+    elif current >= ema20 * 0.99:
 
-        score += 12
+        score += 10
 
-    else:
-
-        return None
-
-    # EMA20 yukarı
+    # EMA20 slope
     if ema20 > ema20_prev:
 
-        score += 15
+        score += 25
 
-    else:
+    elif ema20 >= ema20_prev * 0.999:
 
-        return None
+        score += 10
 
-    # EMA50 üstü
+    # EMA50
     if current > ema50:
 
-        score += 15
+        score += 20
+
+    elif current >= ema50 * 0.995:
+
+        score += 10
 
     # RSI
-    if 48 <= rsi_now <= 68:
+    if 48 <= rsi_now <= 65:
 
-        score += 15
+        score += 20
 
     elif 42 <= rsi_now < 48:
 
-        score += 8
+        score += 12
 
-    else:
+    elif 65 < rsi_now <= 70:
 
-        return None
+        score += 10
 
     # Son mum
     if current > previous:
 
-        score += 10
+        score += 5
 
     return {
 
-        "score": score,
+        "score": min(
+            score,
+            100
+        ),
 
         "current": current,
 
@@ -832,6 +1118,7 @@ def analyze_1h(candles):
 def analyze_15m(candles):
 
     if len(candles) < 50:
+
         return None
 
     closes = [
@@ -840,6 +1127,7 @@ def analyze_15m(candles):
     ]
 
     current = closes[-1]
+
     previous = closes[-2]
 
     ema20 = ema(
@@ -853,36 +1141,37 @@ def analyze_15m(candles):
     )
 
     if not ema20 or not rsi_now:
+
         return None
 
     score = 0
 
-    # EMA20 üstü
+    # EMA20
     if current > ema20:
 
+        score += 25
+
+    elif current >= ema20 * 0.997:
+
         score += 15
-
-    else:
-
-        return None
 
     # RSI
-    if 50 <= rsi_now <= 72:
+    if 50 <= rsi_now <= 68:
 
-        score += 15
+        score += 25
 
     elif 45 <= rsi_now < 50:
 
-        score += 8
+        score += 15
 
-    else:
-
-        return None
-
-    # Momentum
-    if current > previous:
+    elif 68 < rsi_now <= 72:
 
         score += 10
+
+    # Son mum
+    if current > previous:
+
+        score += 15
 
     # --------------------------------------------------------
     # HACİM
@@ -893,42 +1182,58 @@ def analyze_15m(candles):
         for x in candles[-21:-1]
     ]
 
-    if not recent_volumes:
-        return None
+    if recent_volumes:
 
-    avg_volume = (
-        sum(recent_volumes)
-        / len(recent_volumes)
-    )
+        avg_volume = (
+            sum(
+                recent_volumes
+            )
+            / len(
+                recent_volumes
+            )
+        )
 
-    current_volume = candles[-1]["volume"]
+        current_volume = (
+            candles[-1]["volume"]
+        )
 
-    if avg_volume <= 0:
+        if avg_volume > 0:
 
-        volume_ratio = 0
+            volume_ratio = (
+                current_volume
+                / avg_volume
+            )
+
+        else:
+
+            volume_ratio = 0
 
     else:
 
-        volume_ratio = (
-            current_volume
-            / avg_volume
-        )
+        volume_ratio = 0
 
     if volume_ratio >= 2.0:
 
-        score += 20
+        score += 35
 
     elif volume_ratio >= 1.5:
 
-        score += 15
+        score += 28
 
     elif volume_ratio >= 1.25:
 
-        score += 8
+        score += 20
+
+    elif volume_ratio >= 1.10:
+
+        score += 10
 
     return {
 
-        "score": score,
+        "score": min(
+            score,
+            100
+        ),
 
         "current": current,
 
@@ -957,13 +1262,22 @@ def analyze_symbol(
         )
 
         volume = ticker.get(
-            "volume",
+            "amount",
+            0
+        )
+
+        price = ticker.get(
+            "price",
             0
         )
 
         # ----------------------------------------------------
-        # 24H FILTRE
+        # 24H
         # ----------------------------------------------------
+
+        if price <= 0:
+
+            return None
 
         if volume < MIN_24H_VOLUME:
 
@@ -983,8 +1297,7 @@ def analyze_symbol(
 
         candles_4h = get_klines(
             symbol,
-            "4h",
-            100
+            "Hour4"
         )
 
         if not candles_4h:
@@ -1005,8 +1318,7 @@ def analyze_symbol(
 
         candles_1h = get_klines(
             symbol,
-            "1h",
-            100
+            "Min60"
         )
 
         if not candles_1h:
@@ -1027,8 +1339,7 @@ def analyze_symbol(
 
         candles_15m = get_klines(
             symbol,
-            "15m",
-            100
+            "Min15"
         )
 
         if not candles_15m:
@@ -1044,14 +1355,23 @@ def analyze_symbol(
             return None
 
         # ----------------------------------------------------
-        # TOPLAM SKOR
+        # AĞIRLIKLI SKOR
+        #
+        # 4H  = %50
+        # 1H  = %30
+        # 15M = %20
         # ----------------------------------------------------
 
         score = (
-            four["score"]
-            + one["score"]
-            + fifteen["score"]
-            + 10
+            four["score"] * 0.50
+            +
+            one["score"] * 0.30
+            +
+            fifteen["score"] * 0.20
+        )
+
+        score = round(
+            score
         )
 
         if score < MIN_SCORE:
@@ -1062,11 +1382,7 @@ def analyze_symbol(
         # GİRİŞ
         # ----------------------------------------------------
 
-        entry = ticker["price"]
-
-        if entry <= 0:
-
-            return None
+        entry = price
 
         # ----------------------------------------------------
         # TP
@@ -1074,17 +1390,26 @@ def analyze_symbol(
 
         tp1 = (
             entry
-            * (1 + TP1_PCT / 100)
+            * (
+                1
+                + TP1_PCT / 100
+            )
         )
 
         tp2 = (
             entry
-            * (1 + TP2_PCT / 100)
+            * (
+                1
+                + TP2_PCT / 100
+            )
         )
 
         tp3 = (
             entry
-            * (1 + TP3_PCT / 100)
+            * (
+                1
+                + TP3_PCT / 100
+            )
         )
 
         # ----------------------------------------------------
@@ -1093,14 +1418,31 @@ def analyze_symbol(
 
         stop = (
             entry
-            * (1 - STOP_PCT / 100)
+            * (
+                1
+                - STOP_PCT / 100
+            )
         )
+
+        # ----------------------------------------------------
+        # SIGNAL TYPE
+        # ----------------------------------------------------
+
+        if score >= STRONG_SCORE:
+
+            signal_type = "🔥 GÜÇLÜ"
+
+        else:
+
+            signal_type = "🟡 ERKEN ADAY"
 
         return {
 
             "symbol": symbol,
 
             "score": score,
+
+            "signal_type": signal_type,
 
             "entry": entry,
 
@@ -1124,7 +1466,20 @@ def analyze_symbol(
 
             "rsi15m": fifteen["rsi"],
 
-            "volume_ratio": fifteen["volume_ratio"]
+            "score4h": four["score"],
+
+            "score1h": one["score"],
+
+            "score15m": fifteen["score"],
+
+            "volume_ratio": fifteen[
+                "volume_ratio"
+            ],
+
+            "funding": ticker.get(
+                "funding",
+                0
+            )
         }
 
     except Exception as e:
@@ -1164,46 +1519,59 @@ def price_format(price):
 
 
 # ============================================================
-# MESAJ
+# TELEGRAM SIGNAL
 # ============================================================
 
 def format_signal(x):
 
     return (
 
-        "🚨 <b>GÜÇLÜ PUMP ADAYI</b>\n\n"
+        f"{x['signal_type']} "
+        "<b>PUMP ADAYI</b>\n\n"
 
         f"🪙 <b>{x['symbol']}</b>\n"
-        f"⭐ <b>Skor: {x['score']}</b>\n\n"
+        f"⭐ <b>Skor: {x['score']}/100</b>\n\n"
 
-        "🟢 <b>Giriş</b>\n"
-        f"{price_format(x['entry'])}\n\n"
+        f"🟢 <b>Giriş:</b> "
+        f"{price_format(x['entry'])}\n"
 
-        "🎯 <b>TP1</b>\n"
-        f"{price_format(x['tp1'])}\n\n"
+        f"🎯 <b>TP1:</b> "
+        f"{price_format(x['tp1'])}\n"
 
-        "🎯 <b>TP2</b>\n"
-        f"{price_format(x['tp2'])}\n\n"
+        f"🎯 <b>TP2:</b> "
+        f"{price_format(x['tp2'])}\n"
 
-        "🎯 <b>TP3</b>\n"
-        f"{price_format(x['tp3'])}\n\n"
+        f"🎯 <b>TP3:</b> "
+        f"{price_format(x['tp3'])}\n"
 
-        "🛑 <b>Stop</b>\n"
+        f"🛑 <b>Stop:</b> "
         f"{price_format(x['stop'])}\n\n"
 
-        f"📊 24H: {x['change']:+.2f}%\n"
-        f"📉 4H dipten dönüş: +{x['recovery']:.2f}%\n"
-        f"⚡ 15M hacim: {x['volume_ratio']:.2f}x\n\n"
+        f"📊 24H: "
+        f"{x['change']:+.2f}%\n"
 
-        f"🔎 4H RSI: {x['rsi4h']:.1f}\n"
-        f"🔎 1H RSI: {x['rsi1h']:.1f}\n"
-        f"🔎 15M RSI: {x['rsi15m']:.1f}\n\n"
+        f"📉 4H dipten dönüş: "
+        f"+{x['recovery']:.2f}%\n"
 
-        "📌 <b>4H DİP + DÖNÜŞ</b>\n"
-        "📈 <b>1H TREND TEYİDİ</b>\n"
-        "⚡ <b>15M MOMENTUM TEYİDİ</b>\n\n"
+        f"⚡ 15M hacim: "
+        f"{x['volume_ratio']:.2f}x\n\n"
 
-        "⚠️ <i>Analiz sinyalidir, otomatik işlem açmaz.</i>"
+        f"🔎 4H RSI: "
+        f"{x['rsi4h']:.1f}\n"
+
+        f"🔎 1H RSI: "
+        f"{x['rsi1h']:.1f}\n"
+
+        f"🔎 15M RSI: "
+        f"{x['rsi15m']:.1f}\n\n"
+
+        f"📌 4H: {x['score4h']}/100\n"
+        f"📈 1H: {x['score1h']}/100\n"
+        f"⚡ 15M: {x['score15m']}/100\n\n"
+
+        "📡 <b>MEXC FUTURES</b>\n"
+        "⚠️ <i>Analiz sinyalidir, "
+        "otomatik işlem açmaz.</i>"
     )
 
 
@@ -1214,54 +1582,50 @@ def format_signal(x):
 def scan():
 
     print("")
-    print("=" * 60)
-    print("🚀 MEXC PUMP RADAR BAŞLADI")
-    print("=" * 60)
+    print("=" * 70)
+    print("🚀 MEXC FUTURES PUMP RADAR BAŞLADI")
+    print("=" * 70)
 
     # --------------------------------------------------------
-    # SYMBOLLER
+    # FUTURES CONTRACTS
     # --------------------------------------------------------
 
-    symbols = get_usdt_symbols()
+    symbols = get_futures_symbols()
 
     if not symbols:
 
-        print("❌ Symbol alınamadı.")
+        print(
+            "❌ Futures sembolleri alınamadı."
+        )
 
         send_telegram(
             "🔴 <b>PUMP RADAR HATASI</b>\n\n"
-            "MEXC coin listesi alınamadı."
+            "MEXC Futures listesi alınamadı."
         )
 
         return
 
-    print(
-        "USDT coin sayısı:",
-        len(symbols)
-    )
-
     # --------------------------------------------------------
-    # 24H
+    # TICKER
     # --------------------------------------------------------
 
-    tickers = get_24h()
+    tickers = get_futures_tickers()
 
     if not tickers:
 
-        print("❌ Ticker alınamadı.")
+        print(
+            "❌ Futures ticker alınamadı."
+        )
 
         send_telegram(
             "🔴 <b>PUMP RADAR HATASI</b>\n\n"
-            "MEXC 24H verileri alınamadı."
+            "MEXC Futures ticker alınamadı."
         )
 
         return
 
     # --------------------------------------------------------
-    # ÖN FİLTRE
-    #
-    # Kline isteğini gereksiz coinlere yapmıyoruz.
-    # Bu taramayı ciddi şekilde hızlandırır.
+    # 24H ÖN FİLTRE
     # --------------------------------------------------------
 
     filtered = []
@@ -1273,10 +1637,11 @@ def scan():
         )
 
         if not ticker:
+
             continue
 
         volume = ticker.get(
-            "volume",
+            "amount",
             0
         )
 
@@ -1285,13 +1650,25 @@ def scan():
             0
         )
 
+        price = ticker.get(
+            "price",
+            0
+        )
+
+        if price <= 0:
+
+            continue
+
         if volume < MIN_24H_VOLUME:
+
             continue
 
         if change < MIN_24H_CHANGE:
+
             continue
 
         if change > MAX_24H_CHANGE:
+
             continue
 
         filtered.append(
@@ -1301,17 +1678,37 @@ def scan():
             )
         )
 
+    # --------------------------------------------------------
+    # HACME GÖRE SIRALA
+    # --------------------------------------------------------
+
+    filtered.sort(
+        key=lambda x: x[1].get(
+            "amount",
+            0
+        ),
+        reverse=True
+    )
+
+    # Sadece ilk X coin
+    filtered = filtered[
+        :MAX_SYMBOLS_TO_SCAN
+    ]
+
     print(
-        "24H filtre sonrası:",
+        "Futures 24H filtre sonrası:",
         len(filtered)
+    )
+
+    print(
+        "Taranacak maksimum coin:",
+        MAX_SYMBOLS_TO_SCAN
     )
 
     if not filtered:
 
-        send_telegram(
-            "🔎 <b>PUMP RADAR</b>\n\n"
-            "Bu taramada 24H filtresini geçen "
-            "coin bulunamadı."
+        print(
+            "❌ 24H filtreyi geçen Futures yok."
         )
 
         return
@@ -1362,10 +1759,14 @@ def scan():
                     print(
                         "🔥 ADAY:",
                         symbol,
-                        "SKOR:",
+                        "| SKOR:",
                         result["score"],
-                        "4H dönüş:",
-                        f"{result['recovery']:.2f}%"
+                        "| 4H:",
+                        result["score4h"],
+                        "| 1H:",
+                        result["score1h"],
+                        "| 15M:",
+                        result["score15m"]
                     )
 
             except Exception as e:
@@ -1376,7 +1777,7 @@ def scan():
                     e
                 )
 
-            if completed % 50 == 0:
+            if completed % 25 == 0:
 
                 print(
                     "İlerleme:",
@@ -1396,7 +1797,7 @@ def scan():
 
     print("")
     print(
-        "4H + 1H + 15M güçlü aday:",
+        "🎯 TOPLAM ADAY:",
         len(candidates)
     )
 
@@ -1410,14 +1811,31 @@ def scan():
             "Bu taramada sinyal yok."
         )
 
-        # Telegram'a her 5 dakikada
-        # gereksiz mesaj yağdırmamak için
-        # aday yok mesajı göndermiyoruz.
-
         return
 
     # --------------------------------------------------------
-    # DUPLICATE
+    # EN İYİ ADAYLARI GÖSTER
+    # --------------------------------------------------------
+
+    print("")
+    print("EN İYİ ADAYLAR:")
+
+    for candidate in candidates[:10]:
+
+        print(
+            candidate["symbol"],
+            "|",
+            candidate["score"],
+            "| 4H",
+            candidate["score4h"],
+            "| 1H",
+            candidate["score1h"],
+            "| 15M",
+            candidate["score15m"]
+        )
+
+    # --------------------------------------------------------
+    # DUPLICATE TEMİZLE
     # --------------------------------------------------------
 
     sent = load_sent()
@@ -1431,11 +1849,15 @@ def scan():
         try:
 
             if (
-                now - float(timestamp)
-                < DUPLICATE_HOURS * 3600
+                now
+                - float(timestamp)
+                <
+                DUPLICATE_HOURS * 3600
             ):
 
-                clean[symbol] = timestamp
+                clean[
+                    symbol
+                ] = timestamp
 
         except Exception:
 
@@ -1444,7 +1866,7 @@ def scan():
     sent = clean
 
     # --------------------------------------------------------
-    # GÖNDER
+    # TELEGRAM
     # --------------------------------------------------------
 
     sent_count = 0
@@ -1491,16 +1913,17 @@ def scan():
 
             print(
                 "✅ GÖNDERİLDİ:",
-                symbol
+                symbol,
+                candidate["score"]
             )
 
     print("")
     print(
-        "📨 Bu taramada gönderilen:",
+        "📨 Telegram gönderilen:",
         sent_count
     )
 
-    print("=" * 60)
+    print("=" * 70)
 
 
 # ============================================================
@@ -1510,7 +1933,7 @@ def scan():
 if __name__ == "__main__":
 
     print("")
-    print("🚀 PUMP RADAR BAŞLIYOR")
+    print("🚀 PUMP RADAR FUTURES BAŞLIYOR")
     print("")
 
     # --------------------------------------------------------
@@ -1540,9 +1963,7 @@ if __name__ == "__main__":
         )
 
     # --------------------------------------------------------
-    # TEK TARAMA
-    #
-    # GitHub Actions için sonsuz while kullanmıyoruz.
+    # TARAMA
     # --------------------------------------------------------
 
     try:
@@ -1562,4 +1983,4 @@ if __name__ == "__main__":
         )
 
     print("")
-    print("🏁 Radar taraması tamamlandı.")
+    print("🏁 Futures radar taraması tamamlandı.")
