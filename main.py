@@ -1,93 +1,70 @@
 import os
-import json
 import time
+import json
+import math
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# MEXC PUMP RADAR 7.0
+# 🚀 MEXC PUMP RADAR 8.0
 #
 # AMAÇ:
-# SADECE GERÇEKTEN GÜÇLENEN VE DİRENÇ KIRILIMINA YAKLAŞAN
-# / KIRILIMI YAPAN COINLERİ BULMAK
+# Pump başlamadan önce güçlü hareketleri yakalamak
 #
-# SADECE MEXC USDT-M FUTURES
+# TELEGRAM:
+# SADECE GÜÇLÜ AL SİNYALİ GÖNDERİR
 #
-# ÖNEMLİ:
-# Telegram başlangıç mesajı YOK
-# İzleme adayı YOK
-# Zayıf sinyal YOK
+# ❌ Sistem aktif mesajı yok
+# ❌ Tarama tamamlandı mesajı yok
+# ❌ İzleme adayı mesajı yok
+# ❌ Pump sonrası mesajı yok
+# ❌ Ters trend mesajı yok
+#
+# ✅ Sadece güçlü sinyal
 # ============================================================
 
 
-BASE = "https://api.mexc.com"
+BASE = "https://contract.mexc.com"
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+STATE_FILE = "signal_history.json"
 
 
 # ============================================================
 # AYARLAR
 # ============================================================
 
-MIN_24H_VOLUME = 150000
-
-MIN_24H_CHANGE = -5
-MAX_24H_CHANGE = 18
-
-# Daha seçici
-MIN_SCORE = 82
-
-# Aynı coin tekrar gönderilmesin
-DUPLICATE_HOURS = 8
-
-# Bir taramada maksimum sinyal
-MAX_SIGNALS_PER_SCAN = 3
-
-# Paralel
 MAX_WORKERS = 12
 
+MIN_SCORE = 85
 
-# ============================================================
-# MOMENTUM FİLTRELERİ
-# ============================================================
+# Aynı coin tekrar gönderilmesin
+SIGNAL_COOLDOWN = 6 * 60 * 60
 
-# Son 15M hareket
-MIN_15M_MOVE = 0.10
-MAX_15M_MOVE = 2.50
+# 24 saatlik aşırı pump filtresi
+MAX_24H_PUMP = 12.0
 
-# Son 1 saat hareket
-MIN_1H_MOVE = 0.30
-MAX_1H_MOVE = 6.00
+# 1 saat aşırı yükselmişse pump sonrası kabul et
+MAX_1H_PUMP = 5.0
 
-# Hacim
-MIN_VOLUME_RATIO = 1.30
+# 15 dakikada çok sert yükselmişse geç kalınmış kabul et
+MAX_15M_PUMP = 3.5
 
-# RSI
-MIN_RSI_15 = 50
-MAX_RSI_15 = 68
+# Hacim çarpanı
+MIN_VOLUME_RATIO = 1.35
+
+# RSI sınırları
+MIN_RSI_15 = 48
+MAX_RSI_15 = 72
 
 MIN_RSI_1H = 48
-MAX_RSI_1H = 68
+MAX_RSI_1H = 72
 
-
-# ============================================================
-# TP / STOP
-# ============================================================
-
-TP1_PCT = 2.0
-TP2_PCT = 4.0
-TP3_PCT = 6.5
-
-STOP_PCT = 2.2
-
-
-# ============================================================
-# DOSYA
-# ============================================================
-
-SENT_FILE = "sent_signals.json"
+# Minimum likidite
+MIN_24H_VOLUME = 100000
 
 
 # ============================================================
@@ -97,43 +74,33 @@ SENT_FILE = "sent_signals.json"
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 MEXC-Pump-Radar-7.0"
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
 })
 
 
 # ============================================================
-# JSON
+# GENEL HTTP
 # ============================================================
 
-def get_json(url, params=None):
+def get_json(url, params=None, timeout=15):
 
     try:
 
         r = session.get(
             url,
             params=params,
-            timeout=15
+            timeout=timeout
         )
 
         if r.status_code != 200:
-
-            print(
-                "HTTP:",
-                r.status_code,
-                url
-            )
-
             return None
 
-        return r.json()
+        data = r.json()
 
-    except Exception as e:
+        return data
 
-        print(
-            "GET hata:",
-            e
-        )
-
+    except Exception:
         return None
 
 
@@ -141,111 +108,91 @@ def get_json(url, params=None):
 # TELEGRAM
 # ============================================================
 
-def send_telegram(text):
+def telegram_send(text):
 
-    if not BOT_TOKEN or not CHAT_ID:
-
-        print("Telegram secret eksik")
-
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram bilgileri yok.")
         return False
 
     url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
     )
 
     payload = {
-
-        "chat_id": CHAT_ID,
-
+        "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-
         "parse_mode": "HTML",
-
         "disable_web_page_preview": True
-
     }
 
     try:
 
         r = session.post(
             url,
-            json=payload,
+            data=payload,
             timeout=15
         )
 
         if r.status_code == 200:
-
-            print("Telegram gönderildi")
-
             return True
 
-        print(
-            "Telegram hata:",
-            r.text
-        )
+        print("Telegram hata:", r.text[:300])
 
     except Exception as e:
 
-        print(
-            "Telegram bağlantı:",
-            e
-        )
+        print("Telegram bağlantı hatası:", e)
 
     return False
 
 
 # ============================================================
-# SENT
+# STATE
 # ============================================================
 
-def load_sent():
+def load_state():
 
     try:
 
-        if os.path.exists(SENT_FILE):
+        if not os.path.exists(STATE_FILE):
+            return {}
 
-            with open(
-                SENT_FILE,
-                "r",
-                encoding="utf-8"
-            ) as f:
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
 
-                return json.load(f)
+            return json.load(f)
 
     except Exception:
-
-        pass
-
-    return {}
+        return {}
 
 
-def save_sent(data):
+def save_state(state):
 
     try:
 
         with open(
-            SENT_FILE,
+            STATE_FILE,
             "w",
             encoding="utf-8"
         ) as f:
 
             json.dump(
-                data,
+                state,
                 f,
+                ensure_ascii=False,
                 indent=2
             )
 
     except Exception as e:
 
-        print(
-            "Sent kayıt:",
-            e
-        )
+        print("State kayıt hatası:", e)
 
 
 # ============================================================
-# FUTURES KONTRATLARI
+# MEXC FUTURES KONTRATLARI
 # ============================================================
 
 def get_contracts():
@@ -255,51 +202,51 @@ def get_contracts():
     )
 
     if not data:
-
         return []
 
-    rows = data.get(
-        "data",
-        []
-    )
+    rows = data.get("data", [])
 
     result = []
 
     for x in rows:
 
-        symbol = str(
-            x.get(
-                "symbol",
-                ""
-            )
-        )
+        try:
 
-        quote = str(
-            x.get(
-                "quoteCoin",
-                ""
-            )
-        )
+            symbol = str(
+                x.get("symbol", "")
+            ).upper()
 
-        settle = str(
-            x.get(
-                "settleCoin",
-                ""
-            )
-        )
+            quote = str(
+                x.get("quoteCoin", "")
+            ).upper()
 
-        # SADECE USDT FUTURES
+            settle = str(
+                x.get("settleCoin", "")
+            ).upper()
 
-        if not symbol.endswith("_USDT"):
+            state = x.get("state", 0)
+
+            # ------------------------------------------------
+            # SADECE USDT FUTURES
+            # ------------------------------------------------
+
+            if quote != "USDT":
+                continue
+
+            if settle != "USDT":
+                continue
+
+            if not symbol.endswith("_USDT"):
+                continue
+
+            # Aktif kontrat
+            if state not in [0, 1, None]:
+                continue
+
+            result.append(symbol)
+
+        except Exception:
             continue
-
-        if quote != "USDT":
-            continue
-
-        if settle != "USDT":
-            continue
-
-        result.append(symbol)
 
     return result
 
@@ -308,184 +255,177 @@ def get_contracts():
 # TICKER
 # ============================================================
 
-def get_tickers():
+def get_ticker(symbol):
 
     data = get_json(
-        f"{BASE}/api/v1/contract/ticker"
+        f"{BASE}/api/v1/contract/ticker",
+        params={
+            "symbol": symbol
+        }
     )
 
     if not data:
+        return None
 
-        return {}
+    d = data.get("data")
 
-    rows = data.get(
-        "data",
-        []
-    )
+    if not isinstance(d, dict):
+        return None
 
-    if isinstance(rows, dict):
+    try:
 
-        rows = [rows]
+        last = float(d.get("lastPrice", 0))
+        rise = float(d.get("riseRate", 0))
+        volume = float(d.get("volume24", 0))
 
-    result = {}
+        if last <= 0:
+            return None
 
-    for x in rows:
+        # riseRate bazı cevaplarda oran olabilir
+        # örnek 0.0515 = +5.15%
+        if abs(rise) < 1:
+            rise *= 100
 
-        try:
+        return {
+            "price": last,
+            "change24": rise,
+            "volume24": volume
+        }
 
-            symbol = x.get(
-                "symbol",
-                ""
-            )
-
-            if not symbol.endswith("_USDT"):
-                continue
-
-            price = float(
-                x.get(
-                    "lastPrice",
-                    0
-                ) or 0
-            )
-
-            change = float(
-                x.get(
-                    "riseFallRate",
-                    0
-                ) or 0
-            ) * 100
-
-            volume = float(
-                x.get(
-                    "amount24",
-                    0
-                ) or 0
-            )
-
-            if price <= 0:
-                continue
-
-            result[symbol] = {
-
-                "price": price,
-
-                "change": change,
-
-                "volume": volume
-
-            }
-
-        except Exception:
-
-            continue
-
-    return result
+    except Exception:
+        return None
 
 
 # ============================================================
 # KLINE
 # ============================================================
 
-def get_klines(
-    symbol,
-    interval,
-    limit=120
-):
+def get_klines(symbol, interval="Min15", limit=120):
 
     data = get_json(
         f"{BASE}/api/v1/contract/kline/{symbol}",
-        {
+        params={
             "interval": interval
         }
     )
 
     if not data:
-
         return []
 
-    market = data.get(
-        "data"
-    )
+    d = data.get("data")
 
-    if not market:
-
+    if not isinstance(d, dict):
         return []
 
-    opens = market.get(
-        "open",
-        []
-    )
+    try:
 
-    highs = market.get(
-        "high",
-        []
-    )
+        times = d.get("time", [])
+        opens = d.get("open", [])
+        highs = d.get("high", [])
+        lows = d.get("low", [])
+        closes = d.get("close", [])
+        vols = d.get("vol", [])
 
-    lows = market.get(
-        "low",
-        []
-    )
+        rows = []
 
-    closes = market.get(
-        "close",
-        []
-    )
+        n = min(
+            len(times),
+            len(opens),
+            len(highs),
+            len(lows),
+            len(closes),
+            len(vols)
+        )
 
-    volumes = market.get(
-        "vol",
-        []
-    )
+        for i in range(max(0, n - limit), n):
 
-    count = min(
-        len(opens),
-        len(highs),
-        len(lows),
-        len(closes),
-        len(volumes)
-    )
-
-    if count < 60:
-
-        return []
-
-    start = max(
-        0,
-        count - limit
-    )
-
-    candles = []
-
-    for i in range(
-        start,
-        count
-    ):
-
-        try:
-
-            candles.append({
-
-                "open":
-                    float(opens[i]),
-
-                "high":
-                    float(highs[i]),
-
-                "low":
-                    float(lows[i]),
-
-                "close":
-                    float(closes[i]),
-
-                "volume":
-                    float(volumes[i])
-
+            rows.append({
+                "time": float(times[i]),
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(vols[i])
             })
 
-        except Exception:
+        return rows
 
-            continue
+    except Exception:
+        return []
 
-    return candles
+
+# ============================================================
+# RSI
+# ============================================================
+
+def calculate_rsi(values, period=14):
+
+    if len(values) < period + 2:
+        return None
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(values)):
+
+        diff = values[i] - values[i - 1]
+
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
+
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+
+    avg_gain = sum(
+        gains[:period]
+    ) / period
+
+    avg_loss = sum(
+        losses[:period]
+    ) / period
+
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            (avg_gain * (period - 1))
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1))
+            + losses[i]
+        ) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (
+        100 / (1 + rs)
+    )
+
+
+# ============================================================
+# CHANGE
+# ============================================================
+
+def percent_change(klines, candles):
+
+    if len(klines) < candles + 1:
+        return 0
+
+    old = klines[-candles - 1]["close"]
+    new = klines[-1]["close"]
+
+    if old <= 0:
+        return 0
+
+    return (
+        (new - old) / old
+    ) * 100
 
 
 # ============================================================
@@ -495,1280 +435,777 @@ def get_klines(
 def ema(values, period):
 
     if len(values) < period:
-
         return None
 
-    multiplier = 2 / (
-        period + 1
-    )
+    multiplier = 2 / (period + 1)
 
-    value = sum(
+    result = sum(
         values[:period]
     ) / period
 
     for price in values[period:]:
 
-        value = (
-            (price - value)
+        result = (
+            (price - result)
             * multiplier
-        ) + value
+        ) + result
 
-    return value
-
-
-# ============================================================
-# RSI
-# ============================================================
-
-def rsi(
-    values,
-    period=14
-):
-
-    if len(values) < period + 1:
-
-        return None
-
-    gains = []
-    losses = []
-
-    for i in range(
-        1,
-        len(values)
-    ):
-
-        diff = (
-            values[i]
-            - values[i - 1]
-        )
-
-        if diff > 0:
-
-            gains.append(diff)
-            losses.append(0)
-
-        else:
-
-            gains.append(0)
-            losses.append(
-                abs(diff)
-            )
-
-    avg_gain = (
-        sum(
-            gains[:period]
-        ) / period
-    )
-
-    avg_loss = (
-        sum(
-            losses[:period]
-        ) / period
-    )
-
-    for i in range(
-        period,
-        len(gains)
-    ):
-
-        avg_gain = (
-            (
-                avg_gain
-                * (period - 1)
-            )
-            + gains[i]
-        ) / period
-
-        avg_loss = (
-            (
-                avg_loss
-                * (period - 1)
-            )
-            + losses[i]
-        ) / period
-
-    if avg_loss == 0:
-
-        return 100
-
-    rs = (
-        avg_gain
-        / avg_loss
-    )
-
-    return (
-        100
-        - 100 / (1 + rs)
-    )
+    return result
 
 
 # ============================================================
 # ATR
 # ============================================================
 
-def atr(candles, period=14):
+def calculate_atr(klines, period=14):
 
-    if len(candles) < period + 1:
-
+    if len(klines) < period + 2:
         return None
 
     trs = []
 
-    for i in range(
-        1,
-        len(candles)
-    ):
+    for i in range(1, len(klines)):
 
-        current = candles[i]
-        previous = candles[i - 1]
-
-        tr1 = (
-            current["high"]
-            - current["low"]
-        )
-
-        tr2 = abs(
-            current["high"]
-            - previous["close"]
-        )
-
-        tr3 = abs(
-            current["low"]
-            - previous["close"]
-        )
+        high = klines[i]["high"]
+        low = klines[i]["low"]
+        prev = klines[i - 1]["close"]
 
         tr = max(
-            tr1,
-            tr2,
-            tr3
+            high - low,
+            abs(high - prev),
+            abs(low - prev)
         )
 
         trs.append(tr)
 
     if len(trs) < period:
-
         return None
 
-    return (
-        sum(trs[-period:])
-        / period
-    )
+    return sum(
+        trs[-period:]
+    ) / period
 
 
 # ============================================================
-# YÜKSELEN DİP
+# VOLUME RATIO
 # ============================================================
 
-def higher_low(candles):
+def volume_ratio(klines):
 
-    if len(candles) < 8:
+    if len(klines) < 25:
+        return 0
 
+    current = klines[-1]["volume"]
+
+    previous = [
+        x["volume"]
+        for x in klines[-21:-1]
+    ]
+
+    if not previous:
+        return 0
+
+    avg = sum(previous) / len(previous)
+
+    if avg <= 0:
+        return 0
+
+    return current / avg
+
+
+# ============================================================
+# HIGHER LOW
+# ============================================================
+
+def higher_low(klines):
+
+    if len(klines) < 15:
         return False
-
-    recent = candles[-8:-1]
 
     lows = [
         x["low"]
-        for x in recent
+        for x in klines[-12:]
     ]
 
-    # Son dip bölgesi
-    first_low = min(
-        lows[:4]
+    # Son dip
+    recent_low = min(
+        lows[-5:]
     )
 
-    second_low = min(
-        lows[4:]
+    # Önceki dip
+    previous_low = min(
+        lows[:7]
     )
 
-    return second_low > first_low
+    return recent_low > previous_low
 
 
 # ============================================================
-# SON MUM ALICI KONTROLÜ
+# 1H HIGHER LOW
 # ============================================================
 
-def bullish_candle(candle):
+def one_hour_higher_low(klines):
 
-    if candle["close"] <= candle["open"]:
-
+    if len(klines) < 15:
         return False
 
-    body = abs(
-        candle["close"]
-        - candle["open"]
+    lows = [
+        x["low"]
+        for x in klines[-12:]
+    ]
+
+    recent = min(
+        lows[-5:]
     )
 
-    full_range = (
-        candle["high"]
-        - candle["low"]
+    previous = min(
+        lows[:7]
     )
 
-    if full_range <= 0:
-
-        return False
-
-    body_ratio = (
-        body
-        / full_range
-    )
-
-    return body_ratio >= 0.45
+    return recent > previous
 
 
 # ============================================================
 # DİRENÇ
 # ============================================================
 
-def resistance_level(candles):
+def resistance_level(klines):
 
-    if len(candles) < 30:
-
+    if len(klines) < 25:
         return None
 
-    # Son 20 KAPANMIŞ mumun yüksekliği
-    window = candles[-21:-1]
-
-    if not window:
-
-        return None
-
-    return max(
+    # Son mum hariç önceki 20 mum
+    highs = [
         x["high"]
-        for x in window
-    )
+        for x in klines[-21:-1]
+    ]
 
-
-# ============================================================
-# ANA ANALİZ
-# ============================================================
-
-def analyze(
-    symbol,
-    ticker,
-    c15,
-    c1,
-    c4
-):
-
-    if min(
-        len(c15),
-        len(c1),
-        len(c4)
-    ) < 60:
-
+    if not highs:
         return None
 
-
-    # ========================================================
-    # SADECE KAPANMIŞ MUM
-    # ========================================================
-
-    last15 = c15[-2]
-    prev15 = c15[-3]
-    prev15_2 = c15[-4]
-
-    last1 = c1[-2]
-    prev1 = c1[-3]
-
-    last4 = c4[-2]
+    return max(highs)
 
 
-    # ========================================================
-    # FİYATLAR
-    # ========================================================
+# ============================================================
+# DİRENÇ KIRILIMI
+# ============================================================
 
-    close15 = [
-        x["close"]
-        for x in c15[:-1]
-    ]
+def breakout(klines):
 
-    close1 = [
-        x["close"]
-        for x in c1[:-1]
-    ]
+    if len(klines) < 25:
+        return False, None
 
-    close4 = [
-        x["close"]
-        for x in c4[:-1]
-    ]
-
-
-    # ========================================================
-    # EMA
-    # ========================================================
-
-    ema9_15 = ema(
-        close15,
-        9
+    resistance = resistance_level(
+        klines
     )
 
-    ema20_15 = ema(
-        close15,
+    if resistance is None:
+        return False, None
+
+    close = klines[-1]["close"]
+
+    # %0.15 üzeri kırılım
+    broken = (
+        close >
+        resistance * 1.0015
+    )
+
+    return broken, resistance
+
+
+# ============================================================
+# SIKIŞMA
+# ============================================================
+
+def compression(klines):
+
+    if len(klines) < 25:
+        return False
+
+    ranges = []
+
+    for x in klines[-20:]:
+
+        if x["close"] <= 0:
+            continue
+
+        ranges.append(
+            (
+                x["high"] -
+                x["low"]
+            ) / x["close"] * 100
+        )
+
+    if len(ranges) < 10:
+        return False
+
+    avg = sum(ranges) / len(ranges)
+
+    recent = sum(
+        ranges[-5:]
+    ) / 5
+
+    return recent < avg * 0.80
+
+
+# ============================================================
+# TEK COIN ANALİZİ
+# ============================================================
+
+def analyze_symbol(symbol):
+
+    ticker = get_ticker(symbol)
+
+    if not ticker:
+        return None
+
+    price = ticker["price"]
+
+    change24 = ticker["change24"]
+
+    volume24 = ticker["volume24"]
+
+    # --------------------------------------------------------
+    # 24H ÖN FİLTRE
+    # --------------------------------------------------------
+
+    if volume24 < MIN_24H_VOLUME:
+        return None
+
+    # Pump'ı çoktan yapmış coin
+    if change24 > MAX_24H_PUMP:
+        return None
+
+    # --------------------------------------------------------
+    # KLINE
+    # --------------------------------------------------------
+
+    k15 = get_klines(
+        symbol,
+        "Min15",
+        100
+    )
+
+    k1h = get_klines(
+        symbol,
+        "Min60",
+        100
+    )
+
+    k4h = get_klines(
+        symbol,
+        "Hour4",
+        80
+    )
+
+    if (
+        len(k15) < 40
+        or len(k1h) < 40
+        or len(k4h) < 30
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # DEĞİŞİMLER
+    # --------------------------------------------------------
+
+    change15 = percent_change(
+        k15,
+        1
+    )
+
+    change1h = percent_change(
+        k1h,
+        1
+    )
+
+    # Pump sonrası filtre
+    if change1h > MAX_1H_PUMP:
+        return None
+
+    if change15 > MAX_15M_PUMP:
+        return None
+
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
+
+    closes15 = [
+        x["close"]
+        for x in k15
+    ]
+
+    closes1h = [
+        x["close"]
+        for x in k1h
+    ]
+
+    closes4h = [
+        x["close"]
+        for x in k4h
+    ]
+
+    rsi15 = calculate_rsi(
+        closes15
+    )
+
+    rsi1h = calculate_rsi(
+        closes1h
+    )
+
+    rsi4h = calculate_rsi(
+        closes4h
+    )
+
+    if (
+        rsi15 is None
+        or rsi1h is None
+        or rsi4h is None
+    ):
+        return None
+
+    # Çok zayıf
+    if rsi15 < MIN_RSI_15:
+        return None
+
+    if rsi1h < MIN_RSI_1H:
+        return None
+
+    # Aşırı alınmış
+    if rsi15 > MAX_RSI_15:
+        return None
+
+    if rsi1h > MAX_RSI_1H:
+        return None
+
+    # --------------------------------------------------------
+    # HACİM
+    # --------------------------------------------------------
+
+    vr = volume_ratio(
+        k15
+    )
+
+    if vr < MIN_VOLUME_RATIO:
+        return None
+
+    # --------------------------------------------------------
+    # HIGHER LOW
+    # --------------------------------------------------------
+
+    hl15 = higher_low(
+        k15
+    )
+
+    hl1h = one_hour_higher_low(
+        k1h
+    )
+
+    # --------------------------------------------------------
+    # BREAKOUT
+    # --------------------------------------------------------
+
+    is_breakout, resistance = breakout(
+        k15
+    )
+
+    # --------------------------------------------------------
+    # EMA TREND
+    # --------------------------------------------------------
+
+    ema20_1h = ema(
+        closes1h,
         20
     )
 
-    ema20_15_prev = ema(
-        close15[:-1],
-        20
-    )
-
-    ema20_1 = ema(
-        close1,
-        20
-    )
-
-    ema50_1 = ema(
-        close1,
+    ema50_1h = ema(
+        closes1h,
         50
     )
 
-    ema20_4 = ema(
-        close4,
+    trend1h = False
+
+    if (
+        ema20_1h
+        and ema50_1h
+        and price > ema20_1h
+        and ema20_1h > ema50_1h
+    ):
+        trend1h = True
+
+    # 4H trend
+    ema20_4h = ema(
+        closes4h,
         20
     )
 
+    trend4h = False
 
-    if not all([
-        ema9_15,
-        ema20_15,
-        ema20_15_prev,
-        ema20_1,
-        ema50_1,
-        ema20_4
-    ]):
+    if (
+        ema20_4h
+        and price > ema20_4h
+    ):
+        trend4h = True
 
-        return None
+    # --------------------------------------------------------
+    # SIKIŞMA
+    # --------------------------------------------------------
 
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    rsi15 = rsi(
-        close15
+    squeeze = compression(
+        k15
     )
 
-    rsi1 = rsi(
-        close1
-    )
-
-    rsi4 = rsi(
-        close4
-    )
-
-    if not all([
-        rsi15,
-        rsi1,
-        rsi4
-    ]):
-
-        return None
-
-
-    # ========================================================
-    # 24H
-    # ========================================================
-
-    if ticker["change"] < MIN_24H_CHANGE:
-
-        return None
-
-    if ticker["change"] > MAX_24H_CHANGE:
-
-        return None
-
-
-    # ========================================================
-    # 15M MOMENTUM
-    # ========================================================
-
-    move15 = (
-        (
-            last15["close"]
-            - prev15["close"]
-        )
-        / prev15["close"]
-    ) * 100
-
-
-    # ÇOK ÖNEMLİ:
-    # Son 15M NEGATİF ise AL YOK
-
-    if move15 < MIN_15M_MOVE:
-
-        return None
-
-    if move15 > MAX_15M_MOVE:
-
-        return None
-
-
-    # ========================================================
-    # 1H MOMENTUM
-    # ========================================================
-
-    old1h = c15[-6]["close"]
-
-    move1h = (
-        (
-            last15["close"]
-            - old1h
-        )
-        / old1h
-    ) * 100
-
-
-    # Son 1 saat negatif ise AL YOK
-
-    if move1h < MIN_1H_MOVE:
-
-        return None
-
-    if move1h > MAX_1H_MOVE:
-
-        return None
-
-
-    # ========================================================
-    # SON MUM
-    # ========================================================
-
-    if not bullish_candle(last15):
-
-        return None
-
-
-    # ========================================================
-    # ÖNCEKİ MUM DA ÇOK ZAYIF OLMASIN
-    # ========================================================
-
-    if prev15["close"] < prev15["open"]:
-
-        # Önceki mum kırmızı olabilir ama çok büyük
-        # satış mumu olmamalı.
-
-        prev_move = (
-            (
-                prev15["close"]
-                - prev15["open"]
-            )
-            / prev15["open"]
-        ) * 100
-
-        if prev_move < -1.2:
-
-            return None
-
-
-    # ========================================================
-    # EMA 15M
-    # ========================================================
-
-    if ema9_15 <= ema20_15:
-
-        return None
-
-
-    # EMA20 yukarı eğimli olsun
-
-    if ema20_15 <= ema20_15_prev:
-
-        return None
-
-
-    # ========================================================
-    # 1H TREND
-    # ========================================================
-
-    if last1["close"] <= ema20_1:
-
-        return None
-
-    if ema20_1 <= ema50_1:
-
-        return None
-
-
-    # 1H son mum kırmızı ve güçlü satış ise alma
-
-    if last1["close"] < last1["open"]:
-
-        red_move = (
-            (
-                last1["close"]
-                - last1["open"]
-            )
-            / last1["open"]
-        ) * 100
-
-        if red_move < -0.8:
-
-            return None
-
-
-    # ========================================================
-    # 4H TREND
-    # ========================================================
-
-    if last4["close"] < ema20_4 * 0.985:
-
-        return None
-
-
-    # ========================================================
-    # RSI
-    # ========================================================
-
-    if rsi15 < MIN_RSI_15:
-
-        return None
-
-    if rsi15 > MAX_RSI_15:
-
-        return None
-
-    if rsi1 < MIN_RSI_1H:
-
-        return None
-
-    if rsi1 > MAX_RSI_1H:
-
-        return None
-
-
-    # ========================================================
-    # RSI YÖNÜ
-    # ========================================================
-
-    rsi15_prev = rsi(
-        close15[:-1]
-    )
-
-    if rsi15_prev:
-
-        if rsi15 <= rsi15_prev:
-
-            return None
-
-
-    # ========================================================
-    # HACİM
-    # ========================================================
-
-    volumes = [
-        x["volume"]
-        for x in c15[-21:-1]
-        if x["volume"] > 0
-    ]
-
-    if len(volumes) < 10:
-
-        return None
-
-    avg_volume = (
-        sum(volumes)
-        / len(volumes)
-    )
-
-    if avg_volume <= 0:
-
-        return None
-
-    volume_ratio = (
-        last15["volume"]
-        / avg_volume
-    )
-
-
-    if volume_ratio < MIN_VOLUME_RATIO:
-
-        return None
-
-
-    # ========================================================
-    # SON 3 MUM ALICI BASKISI
-    # ========================================================
-
-    bullish_count = 0
-
-    for candle in c15[-4:-1]:
-
-        if candle["close"] > candle["open"]:
-
-            bullish_count += 1
-
-
-    if bullish_count < 2:
-
-        return None
-
-
-    # ========================================================
-    # HIGHER LOW
-    # ========================================================
-
-    hl15 = higher_low(
-        c15
-    )
-
-    hl1h = higher_low(
-        c1
-    )
-
-    if not hl15:
-
-        return None
-
-    if not hl1h:
-
-        return None
-
-
-    # ========================================================
-    # DİRENÇ
-    # ========================================================
-
-    resistance = resistance_level(
-        c15
-    )
-
-    if not resistance:
-
-        return None
-
-
-    current_price = ticker["price"]
-
-
-    # ========================================================
-    # DİRENÇ MESAFESİ
-    # ========================================================
-
-    resistance_distance = (
-        (
-            resistance
-            - current_price
-        )
-        / current_price
-    ) * 100
-
-
-    # Fiyat dirençten çok uzaktaysa AL YOK
-
-    if resistance_distance > 1.5:
-
-        return None
-
-
-    # ========================================================
-    # KIRILIM
-    # ========================================================
-
-    breakout = (
-        last15["close"]
-        > resistance
-    )
-
-
-    # Kırılım değilse fiyat en azından dirence çok yakın
-    # olmalı
-
-    if not breakout:
-
-        if resistance_distance > 0.7:
-
-            return None
-
-
-    # ========================================================
-    # KIRILIM MUMU
-    # ========================================================
-
-    breakout_strength = 0
-
-    if breakout:
-
-        breakout_strength = (
-            (
-                last15["close"]
-                - resistance
-            )
-            / resistance
-        ) * 100
-
-        # Çok küçük sahte kırılımları engelle
-
-        if breakout_strength < 0.05:
-
-            return None
-
-        # Aşırı kaçmış kırılımı alma
-
-        if breakout_strength > 2.0:
-
-            return None
-
-
-    # ========================================================
-    # ATR
-    # ========================================================
-
-    atr15 = atr(
-        c15,
-        14
-    )
-
-    if not atr15:
-
-        return None
-
-
-    # ========================================================
-    # SCORE
-    # ========================================================
+    # --------------------------------------------------------
+    # SKOR
+    # --------------------------------------------------------
 
     score = 0
 
+    reasons = []
 
-    # EMA 15M
-    score += 15
+    # 15M momentum
+    if change15 > 0:
+        score += 10
+        reasons.append(
+            "15M MOMENTUM"
+        )
 
+    # 1H trend
+    if trend1h:
+        score += 15
+        reasons.append(
+            "1H TREND"
+        )
 
-    # EMA 1H
-    score += 15
+    # 4H trend
+    if trend4h:
+        score += 10
+        reasons.append(
+            "4H TREND"
+        )
 
+    # Higher low
+    if hl15:
+        score += 12
+        reasons.append(
+            "HIGHER LOW"
+        )
 
-    # 4H
-    if last4["close"] >= ema20_4:
-
-        score += 5
-
+    # 1H higher low
+    if hl1h:
+        score += 10
+        reasons.append(
+            "1H HIGHER LOW"
+        )
 
     # Hacim
-    if volume_ratio >= 2.0:
-
-        score += 20
-
-    elif volume_ratio >= 1.6:
-
-        score += 17
-
-    elif volume_ratio >= 1.3:
-
-        score += 13
-
-
-    # Momentum
-    if 0.5 <= move15 <= 1.8:
-
-        score += 10
-
-    else:
-
-        score += 6
-
-
-    if 0.8 <= move1h <= 4:
-
-        score += 10
-
-    else:
-
-        score += 6
-
-
-    # RSI
-    if 55 <= rsi15 <= 64:
-
-        score += 8
-
-    else:
-
-        score += 5
-
-
-    # Higher Low
-    if hl15:
-
-        score += 5
-
-    if hl1h:
-
-        score += 5
-
-
-    # Kırılım
-    if breakout:
-
+    if vr >= 1.35:
         score += 15
+        reasons.append(
+            "HACİM"
+        )
 
-
-    # Son 3 mum
-    if bullish_count == 3:
-
+    if vr >= 1.70:
         score += 5
 
+    # Breakout
+    if is_breakout:
+        score += 18
+        reasons.append(
+            "DİRENÇ KIRILIMI"
+        )
 
-    # ========================================================
-    # CEZA
-    # ========================================================
+    # Sıkışma
+    if squeeze:
+        score += 8
+        reasons.append(
+            "SIKIŞMA"
+        )
 
-    # 24H fazla yükselmiş
-    if ticker["change"] > 12:
+    # RSI sağlıklı bölgede
+    if (
+        52 <= rsi15 <= 68
+        and 52 <= rsi1h <= 68
+    ):
+        score += 7
+        reasons.append(
+            "RSI TEYİDİ"
+        )
 
-        score -= 8
+    # 15M yükseliş
+    if 0 < change15 <= 2.5:
+        score += 5
 
-
-    # 15M fazla hızlı
-    if move15 > 2:
-
-        score -= 8
-
-
-    # 1H fazla hızlı
-    if move1h > 5:
-
-        score -= 8
-
-
-    # ========================================================
-    # SON SKOR
-    # ========================================================
+    # --------------------------------------------------------
+    # GÜÇLÜ SİNYAL
+    # --------------------------------------------------------
 
     if score < MIN_SCORE:
-
         return None
 
+    # En az 2 ana yapısal teyit
+    structure_count = sum([
+        hl15,
+        hl1h,
+        trend1h,
+        is_breakout
+    ])
 
-    # ========================================================
-    # GİRİŞ
-    # ========================================================
-
-    entry = current_price
-
-
-    # Fiyat son kapanıştan çok uzaksa
-    # sinyal kaçmış olabilir
-
-    candle_close_distance = (
-        (
-            current_price
-            - last15["close"]
-        )
-        / last15["close"]
-    ) * 100
-
-
-    if candle_close_distance > 1.0:
-
+    if structure_count < 2:
         return None
 
+    # --------------------------------------------------------
+    # STOP / TP
+    # --------------------------------------------------------
 
-    # ========================================================
-    # STOP
-    # ========================================================
-
-    structure_stop = resistance - (
-        atr15 * 0.8
+    atr = calculate_atr(
+        k15,
+        14
     )
 
-    percent_stop = entry * (
-        1 - STOP_PCT / 100
+    if not atr or atr <= 0:
+        return None
+
+    # ATR tabanlı stop
+    stop = price - (
+        atr * 1.35
     )
 
-    stop = max(
-        structure_stop,
-        percent_stop
+    risk = price - stop
+
+    if risk <= 0:
+        return None
+
+    tp1 = price + (
+        risk * 1.0
     )
 
-
-    # Stop girişin üstünde olamaz
-
-    if stop >= entry:
-
-        stop = percent_stop
-
-
-    # Stop çok yakınsa
-    # minimum mesafe
-
-    min_stop = entry * 0.985
-
-    if stop > min_stop:
-
-        stop = min_stop
-
-
-    # ========================================================
-    # TP
-    # ========================================================
-
-    tp1 = entry * (
-        1 + TP1_PCT / 100
+    tp2 = price + (
+        risk * 1.8
     )
 
-    tp2 = entry * (
-        1 + TP2_PCT / 100
+    tp3 = price + (
+        risk * 2.6
     )
 
-    tp3 = entry * (
-        1 + TP3_PCT / 100
-    )
+    # --------------------------------------------------------
+    # SİNYAL TİPİ
+    # --------------------------------------------------------
 
+    if is_breakout:
+        signal_type = "🔥 DİRENÇ KIRILIMI"
 
-    # ========================================================
-    # RETURN
-    # ========================================================
+    elif hl15 and hl1h and vr >= 1.5:
+        signal_type = "🚀 PUMP ÖNCESİ GÜÇLENME"
+
+    else:
+        signal_type = "⚡ ERKEN MOMENTUM"
 
     return {
-
         "symbol": symbol,
-
-        "score": min(
-            int(score),
-            100
-        ),
-
-        "entry": entry,
-
+        "score": score,
+        "price": price,
         "tp1": tp1,
-
         "tp2": tp2,
-
         "tp3": tp3,
-
         "stop": stop,
-
-        "change": ticker["change"],
-
-        "move1h": move1h,
-
-        "move15m": move15,
-
-        "volume_ratio": volume_ratio,
-
+        "change24": change24,
+        "change1h": change1h,
+        "change15": change15,
+        "volume_ratio": vr,
         "rsi15": rsi15,
-
-        "rsi1": rsi1,
-
-        "rsi4": rsi4,
-
+        "rsi1h": rsi1h,
+        "rsi4h": rsi4h,
         "resistance": resistance,
-
-        "breakout": breakout,
-
-        "higher_low": hl15
-
+        "higher_low": hl15,
+        "higher_low_1h": hl1h,
+        "breakout": is_breakout,
+        "squeeze": squeeze,
+        "signal_type": signal_type,
+        "reasons": reasons
     }
 
 
 # ============================================================
-# COIN ANALİZİ
+# FİYAT FORMAT
 # ============================================================
 
-def analyze_symbol(item):
-
-    symbol, ticker = item
-
-    try:
-
-        c15 = get_klines(
-            symbol,
-            "Min15",
-            120
-        )
-
-        c1 = get_klines(
-            symbol,
-            "Min60",
-            120
-        )
-
-        c4 = get_klines(
-            symbol,
-            "Hour4",
-            120
-        )
-
-        if not c15 or not c1 or not c4:
-
-            return None
-
-        return analyze(
-            symbol,
-            ticker,
-            c15,
-            c1,
-            c4
-        )
-
-    except Exception as e:
-
-        print(
-            symbol,
-            "hata:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# PRICE FORMAT
-# ============================================================
-
-def price_format(price):
+def format_price(price):
 
     if price >= 100:
-
         return f"{price:.2f}"
 
     if price >= 1:
-
-        return f"{price:.4f}"
+        return f"{price:.5f}"
 
     if price >= 0.01:
-
         return f"{price:.6f}"
 
     if price >= 0.0001:
-
         return f"{price:.8f}"
 
     return f"{price:.10f}"
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM MESAJI
 # ============================================================
 
-def format_signal(x):
+def build_message(x):
 
-    if x["breakout"]:
+    symbol = x["symbol"]
 
-        setup = "🔥 DİRENÇ KIRILIMI"
+    score = x["score"]
 
-    else:
+    price = x["price"]
 
-        setup = "⚡ KIRILIM ÖNCESİ GÜÇLENME"
+    tp1 = x["tp1"]
 
+    tp2 = x["tp2"]
 
-    return (
+    tp3 = x["tp3"]
 
-        "🚀 <b>PUMP RADAR AL</b>\n\n"
+    stop = x["stop"]
 
-        f"💎 <b>{x['symbol']}</b>\n"
+    return f"""
+🚀 <b>PUMP RADAR AL</b>
 
-        f"⭐ Skor: <b>{x['score']}/100</b>\n"
+💎 <b>{symbol}</b>
+⭐ <b>Skor: {score}/100</b>
 
-        f"📌 {setup}\n\n"
+📌 <b>{x["signal_type"]}</b>
 
-        f"🟢 Giriş: "
-        f"<b>{price_format(x['entry'])}</b>\n"
+🟢 Giriş: <b>{format_price(price)}</b>
 
-        f"🎯 TP1: "
-        f"<b>{price_format(x['tp1'])}</b>\n"
+🎯 TP1: <b>{format_price(tp1)}</b>
+🎯 TP2: <b>{format_price(tp2)}</b>
+🎯 TP3: <b>{format_price(tp3)}</b>
 
-        f"🎯 TP2: "
-        f"<b>{price_format(x['tp2'])}</b>\n"
+🛑 Stop: <b>{format_price(stop)}</b>
 
-        f"🎯 TP3: "
-        f"<b>{price_format(x['tp3'])}</b>\n"
+📊 24H: {x["change24"]:+.2f}%
+⚡ 1H: {x["change1h"]:+.2f}%
+🔥 15M: {x["change15"]:+.2f}%
+💥 Hacim: <b>{x["volume_ratio"]:.2f}x</b>
 
-        f"🛑 Stop: "
-        f"<b>{price_format(x['stop'])}</b>\n\n"
+📈 RSI 15M: {x["rsi15"]:.1f}
+📈 RSI 1H: {x["rsi1h"]:.1f}
+📊 RSI 4H: {x["rsi4h"]:.1f}
 
-        f"📊 24H: "
-        f"{x['change']:+.2f}%\n"
+🔑 Direnç:
+<b>{format_price(x["resistance"]) if x["resistance"] else "-"}</b>
 
-        f"⚡ 1H: "
-        f"{x['move1h']:+.2f}%\n"
+📈 Higher Low: {"✅" if x["higher_low"] else "❌"}
+📈 1H Higher Low: {"✅" if x["higher_low_1h"] else "❌"}
+🔥 Hacim teyidi: {"✅" if x["volume_ratio"] >= 1.35 else "❌"}
+💥 Direnç kırılımı: {"✅" if x["breakout"] else "❌"}
 
-        f"🔥 15M: "
-        f"{x['move15m']:+.2f}%\n"
+💎 <b>MEXC USDT FUTURES</b>
 
-        f"💥 Hacim: "
-        f"<b>{x['volume_ratio']:.2f}x</b>\n\n"
-
-        f"📈 RSI 15M: "
-        f"{x['rsi15']:.1f}\n"
-
-        f"📈 RSI 1H: "
-        f"{x['rsi1']:.1f}\n"
-
-        f"📊 RSI 4H: "
-        f"{x['rsi4']:.1f}\n\n"
-
-        f"🔑 Direnç: "
-        f"{price_format(x['resistance'])}\n"
-
-        f"📈 Higher Low: "
-        f"{'✅' if x['higher_low'] else '❌'}\n"
-
-        f"🔥 Hacim teyidi: "
-        f"{'✅' if x['volume_ratio'] >= 1.30 else '❌'}\n\n"
-
-        "📡 <b>MEXC USDT FUTURES</b>\n\n"
-
-        "⚠️ <i>Teknik filtrelerden geçen güçlü "
-        "momentum sinyalidir. Garanti değildir.</i>"
-    )
+⚠️ <i>Teknik filtrelerden geçen erken hareket sinyalidir.</i>
+"""
 
 
 # ============================================================
-# ANA TARAMA
+# COOLDOWN
 # ============================================================
 
-def scan():
+def can_send(symbol, state):
 
-    print("")
-    print("=" * 65)
-    print("🚀 MEXC PUMP RADAR 7.0")
-    print("🎯 KIRILIM + MOMENTUM + HACİM")
-    print("=" * 65)
+    now = time.time()
+
+    old = state.get(
+        symbol
+    )
+
+    if old is None:
+        return True
+
+    try:
+
+        last_time = float(
+            old
+        )
+
+        if (
+            now - last_time
+            >= SIGNAL_COOLDOWN
+        ):
+            return True
+
+    except Exception:
+        return True
+
+    return False
 
 
-    # ========================================================
-    # CONTRACT
-    # ========================================================
+# ============================================================
+# ANA RADAR
+# ============================================================
 
-    contracts = get_contracts()
+def main():
+
+    print()
+    print("🚀 MEXC PUMP RADAR 8.0")
+    print("🎯 SADECE GÜÇLÜ GİRİŞ SİNYALLERİ")
+    print()
+
+    if not TELEGRAM_TOKEN:
+        print("⚠️ TELEGRAM_BOT_TOKEN yok.")
+
+    if not TELEGRAM_CHAT_ID:
+        print("⚠️ TELEGRAM_CHAT_ID yok.")
+
+    # --------------------------------------------------------
+    # CONTRACTS
+    # --------------------------------------------------------
+
+    symbols = get_contracts()
 
     print(
-        "Futures kontrat:",
-        len(contracts)
+        f"Futures kontrat: {len(symbols)}"
     )
 
-    if not contracts:
-
+    if not symbols:
         print(
-            "Futures kontrat alınamadı"
+            "❌ Futures listesi alınamadı."
         )
-
         return
 
+    # --------------------------------------------------------
+    # STATE
+    # --------------------------------------------------------
 
-    # ========================================================
-    # TICKER
-    # ========================================================
-
-    tickers = get_tickers()
-
-    print(
-        "Ticker:",
-        len(tickers)
-    )
-
-    if not tickers:
-
-        print(
-            "Ticker alınamadı"
-        )
-
-        return
-
-
-    # ========================================================
-    # ÖN FİLTRE
-    # ========================================================
-
-    filtered = []
-
-    for symbol in contracts:
-
-        ticker = tickers.get(
-            symbol
-        )
-
-        if not ticker:
-
-            continue
-
-
-        volume = ticker["volume"]
-
-        change = ticker["change"]
-
-
-        if volume < MIN_24H_VOLUME:
-
-            continue
-
-
-        if change < MIN_24H_CHANGE:
-
-            continue
-
-
-        if change > MAX_24H_CHANGE:
-
-            continue
-
-
-        filtered.append(
-            (
-                symbol,
-                ticker
-            )
-        )
-
-
-    # ========================================================
-    # HACİM SIRASI
-    # ========================================================
-
-    filtered.sort(
-        key=lambda x: x[1]["volume"],
-        reverse=True
-    )
-
-
-    print(
-        "24H ön filtre:",
-        len(filtered)
-    )
-
-
-    if not filtered:
-
-        print(
-            "Ön filtreden coin geçmedi"
-        )
-
-        return
-
-
-    # ========================================================
-    # DETAYLI TARAMA
-    # ========================================================
+    state = load_state()
 
     candidates = []
 
+    # --------------------------------------------------------
+    # TARAMA
+    # --------------------------------------------------------
+
+    total = len(symbols)
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = {}
-
-        for item in filtered:
-
-            future = executor.submit(
+        futures = {
+            executor.submit(
                 analyze_symbol,
-                item
-            )
+                symbol
+            ): symbol
 
-            futures[future] = item[0]
+            for symbol in symbols
+        }
 
+        completed = 0
 
-        total = len(futures)
-
-
-        for i, future in enumerate(
-            as_completed(futures),
-            1
+        for future in as_completed(
+            futures
         ):
+
+            completed += 1
 
             symbol = futures[
                 future
@@ -1778,7 +1215,6 @@ def scan():
 
                 result = future.result()
 
-
                 if result:
 
                     candidates.append(
@@ -1786,184 +1222,110 @@ def scan():
                     )
 
                     print(
-                        "🔥 ADAY:",
-                        symbol,
-                        result["score"]
+                        f"🔥 ADAY: "
+                        f"{symbol} "
+                        f"{result['score']}"
                     )
-
 
             except Exception as e:
 
                 print(
-                    symbol,
-                    e
+                    f"Hata {symbol}: {e}"
                 )
 
-
             if (
-                i % 25 == 0
-                or i == total
+                completed % 25 == 0
+                or completed == total
             ):
 
                 print(
                     f"İlerleme: "
-                    f"{i}/{total}"
+                    f"{completed}/{total}"
                 )
 
-
-    # ========================================================
-    # SKOR
-    # ========================================================
+    # --------------------------------------------------------
+    # SKOR SIRALAMA
+    # --------------------------------------------------------
 
     candidates.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-
-    print("")
+    print()
     print(
-        "🎯 GÜÇLÜ ADAY:",
-        len(candidates)
+        f"🎯 Güçlü aday: "
+        f"{len(candidates)}"
     )
 
-
-    # ========================================================
-    # SENT
-    # ========================================================
-
-    sent = load_sent()
-
-    now = time.time()
-
-    clean = {}
-
-
-    for symbol, timestamp in sent.items():
-
-        try:
-
-            if (
-                now
-                - float(timestamp)
-                <
-                DUPLICATE_HOURS * 3600
-            ):
-
-                clean[symbol] = timestamp
-
-        except Exception:
-
-            pass
-
-
-    sent = clean
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # TELEGRAM
-    # ========================================================
+    # SADECE BURADA GÖNDERİLİR
+    # --------------------------------------------------------
 
-    sent_count = 0
-
+    sent = 0
 
     for candidate in candidates:
-
-        if (
-            sent_count
-            >= MAX_SIGNALS_PER_SCAN
-        ):
-
-            break
-
 
         symbol = candidate[
             "symbol"
         ]
 
-
-        if symbol in sent:
-
+        if not can_send(
+            symbol,
+            state
+        ):
             print(
-                "Tekrar:",
-                symbol
+                f"⏳ Cooldown: {symbol}"
             )
-
             continue
 
-
-        message = format_signal(
+        message = build_message(
             candidate
         )
 
-
-        if send_telegram(
+        ok = telegram_send(
             message
-        ):
+        )
 
-            sent[symbol] = now
+        if ok:
 
-            save_sent(
-                sent
+            sent += 1
+
+            state[
+                symbol
+            ] = time.time()
+
+            save_state(
+                state
             )
-
-            sent_count += 1
-
 
             print(
-                "GÖNDERİLDİ:",
-                symbol,
-                candidate["score"]
+                f"✅ GÖNDERİLDİ: "
+                f"{symbol} "
+                f"{candidate['score']}"
             )
 
+    # --------------------------------------------------------
+    # SADECE GITHUB LOGU
+    # TELEGRAM'A GİTMEZ
+    # --------------------------------------------------------
 
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
-    print("")
+    print()
     print(
-        "📨 Telegram gönderilen:",
-        sent_count
+        f"📨 Telegram gönderilen: "
+        f"{sent}"
     )
 
-    print("=" * 65)
+    print(
+        "🏁 Tarama tamamlandı."
+    )
 
 
 # ============================================================
-# PROGRAM
+# START
 # ============================================================
 
 if __name__ == "__main__":
 
-    print("")
-    print(
-        "🚀 PUMP RADAR 7.0 BAŞLIYOR"
-    )
-
-    # ========================================================
-    # ÖNEMLİ:
-    # BURADA TELEGRAM TEST MESAJI YOK.
-    # ========================================================
-
-    if not BOT_TOKEN or not CHAT_ID:
-
-        print(
-            "Telegram secret eksik"
-        )
-
-    try:
-
-        scan()
-
-    except Exception as e:
-
-        print(
-            "ANA HATA:",
-            e
-        )
-
-    print("")
-    print(
-        "Tarama tamamlandı."
-    )
+    main()
