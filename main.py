@@ -1,293 +1,328 @@
-# ============================================================
-# 🚀 MEXC PUMP RADAR 13.0
-# 🎯 SADECE FUTURES USDT
-# 🚫 STOCK / AALSTOCK / NVDASTOCK vb. YOK
-# 🟢 BTC BULLISH  -> SADECE LONG
-# 🔴 BTC BEARISH  -> SADECE SHORT
-# ⚪ BTC NEUTRAL  -> İŞLEM YOK
-# ============================================================
-
 import os
-import time
 import json
+import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
 # ============================================================
-# ⚙️ AYARLAR
+# 🚀 MEXC PUMP RADAR 13.0
+#
+# SADECE:
+# ✅ MEXC USDT FUTURES
+# ✅ 15M + 1H + 4H
+# ✅ RSI
+# ✅ Hacim
+# ✅ Momentum
+# ✅ BTC yön filtresi
+# ✅ Pump öncesi dönüş arama
+#
+# KESİNLİKLE:
+# ❌ STOCK
+# ❌ TOKENIZED STOCK
+# ❌ AALSTOCK
+# ❌ MAVSTOCK
+# ❌ Hisse senedi benzeri semboller
+# ❌ Spot
 # ============================================================
 
-BASE_URL = "https://contract.mexc.com"
+BASE = "https://contract.mexc.com"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SCAN_INTERVAL = 300
-MAX_WORKERS = 20
+HISTORY_FILE = "signal_history.json"
 
-# Aynı anda en fazla kaç sinyal Telegram'a gönderilsin
-MAX_SIGNALS = 10
+MAX_WORKERS = 12
 
-# ============================================================
-# 🎯 SİNYAL FİLTRELERİ
-# ============================================================
-
-# LONG
-LONG_RSI_MIN = 53
-LONG_RSI_MAX = 72
-
-# SHORT
-SHORT_RSI_MIN = 28
-SHORT_RSI_MAX = 47
-
-# Hacim
-VOLUME_RATIO_MIN = 1.20
-
-# 15 dakikalık fiyat hareketi
-PRICE_CHANGE_MIN = 0.30
-
-# Güçlü sinyal minimum skor
+# Güçlü sinyal alt sınırı
 MIN_SCORE = 7
 
-
-# ============================================================
-# 🚫 STOCK FİLTRESİ
-# ============================================================
-
-STOCK_KEYWORDS = [
-    "STOCK",
-    "AALSTOCK",
-    "NVDASTOCK",
-    "TSLASTOCK",
-    "AAPLASTOCK",
-    "AMZNSTOCK",
-    "GOOGLSTOCK",
-    "MSTRSTOCK",
-    "COINSTOCK",
-    "META_STOCK",
-    "STOCK_USDT"
-]
+# Aynı coin tekrar tekrar gönderilmesin
+COOLDOWN_HOURS = 6
 
 
 # ============================================================
-# 🌐 SESSION
+# GENEL REQUEST
 # ============================================================
 
-session = requests.Session()
+def get_json(url, params=None, timeout=10):
+    try:
+        r = requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
 
-session.headers.update({
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-})
+        if r.status_code != 200:
+            return None
+
+        return r.json()
+
+    except Exception:
+        return None
 
 
 # ============================================================
-# 📡 TELEGRAM
+# TELEGRAM
 # ============================================================
 
-def send_telegram(message):
+def telegram_send(text):
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram bilgileri bulunamadı.")
+    if not BOT_TOKEN or not CHAT_ID:
         return False
 
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
 
-        r = session.post(
+        r = requests.post(
             url,
-            data=data,
-            timeout=10
+            data={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "disable_web_page_preview": True
+            },
+            timeout=15
         )
 
-        if r.status_code == 200:
+        return r.status_code == 200
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# HISTORY
+# ============================================================
+
+def load_history():
+
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except Exception:
+        return {}
+
+
+def save_history(history):
+
+    try:
+
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# STOCK FİLTRESİ
+# ============================================================
+
+def is_stock_symbol(symbol):
+
+    s = symbol.upper()
+
+    # --------------------------------------------------------
+    # Açıkça stock/hisse olduğunu belirten kelimeler
+    # --------------------------------------------------------
+
+    bad_words = [
+        "STOCK",
+        "STOCKS",
+        "TOKENIZED",
+        "TOKENISED",
+        "ETF",
+        "ETFS",
+        "SHARE",
+        "SHARES",
+        "EQUITY",
+        "EQUITIES",
+        "INDEX",
+        "INDICES"
+    ]
+
+    for word in bad_words:
+
+        if word in s:
             return True
 
-        print("Telegram hata:", r.text)
+    # --------------------------------------------------------
+    # Sık görülen hisse tokenleri
+    # --------------------------------------------------------
 
-    except Exception as e:
+    known_stock_names = [
 
-        print("Telegram gönderim hatası:", e)
+        "AAPL",
+        "AMZN",
+        "GOOG",
+        "GOOGL",
+        "META",
+        "MSFT",
+        "NVDA",
+        "TSLA",
+        "NFLX",
+        "AMD",
+        "INTC",
+        "COIN",
+        "MSTR",
+        "PLTR",
+        "HOOD",
+        "AMBR",
+        "MAV",
+        "AAL",
+        "BA",
+        "NKE",
+        "DIS",
+        "JPM",
+        "V",
+        "MA",
+        "WMT",
+        "PFE",
+        "PYPL",
+        "UBER",
+        "ORCL",
+        "CRM",
+        "AVGO",
+        "QCOM",
+        "MU",
+        "COST",
+        "PEP",
+        "KO",
+        "XOM",
+        "CVX"
+    ]
+
+    base = s.replace("_USDT", "").replace("/USDT", "")
+
+    if base in known_stock_names:
+        return True
 
     return False
 
 
 # ============================================================
-# 📊 MEXC FUTURES KONTRATLARI
+# FUTURES KONTRATLARI
 # ============================================================
 
 def get_futures_symbols():
 
-    url = f"{BASE_URL}/api/v1/contract/detail"
+    data = get_json(
+        f"{BASE}/api/v1/contract/detail"
+    )
 
-    try:
-
-        r = session.get(
-            url,
-            timeout=15
-        )
-
-        if r.status_code != 200:
-            print("❌ Kontrat API hatası")
-            return []
-
-        data = r.json().get("data", [])
-
-        symbols = []
-
-        for item in data:
-
-            symbol = str(
-                item.get("symbol", "")
-            ).upper()
-
-            quote = str(
-                item.get("quoteCoin", "")
-            ).upper()
-
-            contract_type = str(
-                item.get("contractType", "")
-            ).upper()
-
-            state = item.get("state", 1)
-
-            # ------------------------------------------------
-            # SADECE USDT
-            # ------------------------------------------------
-
-            if quote != "USDT":
-                continue
-
-            # ------------------------------------------------
-            # SADECE PERPETUAL FUTURES
-            # ------------------------------------------------
-
-            if contract_type != "PERPETUAL":
-                continue
-
-            # ------------------------------------------------
-            # AKTİF
-            # ------------------------------------------------
-
-            if state != 1:
-                continue
-
-            # ------------------------------------------------
-            # 🚫 STOCK TAMAMEN ENGELLENİYOR
-            # ------------------------------------------------
-
-            if "STOCK" in symbol:
-                continue
-
-            bad = False
-
-            for keyword in STOCK_KEYWORDS:
-
-                if keyword in symbol:
-                    bad = True
-                    break
-
-            if bad:
-                continue
-
-            symbols.append(symbol)
-
-        return sorted(set(symbols))
-
-    except Exception as e:
-
-        print("❌ Futures liste hatası:", e)
+    if not data:
         return []
 
+    symbols = []
+
+    for item in data.get("data", []):
+
+        symbol = item.get("symbol")
+
+        if not symbol:
+            continue
+
+        symbol = symbol.upper()
+
+        # Sadece USDT
+        if not symbol.endswith("_USDT"):
+            continue
+
+        # Stock filtresi
+        if is_stock_symbol(symbol):
+            continue
+
+        # Aktif kontrat
+        if item.get("state") not in [0, None]:
+            continue
+
+        symbols.append(symbol)
+
+    return list(dict.fromkeys(symbols))
+
 
 # ============================================================
-# 🕯️ KLINE
+# KLINE
 # ============================================================
 
-def get_klines(symbol, interval="Min15", limit=100):
+def get_klines(symbol, interval, limit=100):
 
-    url = f"{BASE_URL}/api/v1/contract/kline/{symbol}"
+    url = f"{BASE}/api/v1/contract/kline/{symbol}"
 
-    params = {
-        "interval": interval,
-        "limit": limit
-    }
+    data = get_json(
+        url,
+        params={
+            "interval": interval,
+            "limit": limit
+        }
+    )
+
+    if not data:
+        return None
+
+    d = data.get("data")
+
+    if not d:
+        return None
 
     try:
 
-        r = session.get(
-            url,
-            params=params,
-            timeout=10
-        )
+        closes = d.get("close", [])
+        volumes = d.get("vol", [])
+        highs = d.get("high", [])
+        lows = d.get("low", [])
 
-        if r.status_code != 200:
+        if len(closes) < 30:
             return None
 
-        data = r.json().get("data")
-
-        if not data:
-            return None
-
-        return data
+        return {
+            "close": [float(x) for x in closes],
+            "volume": [float(x) for x in volumes],
+            "high": [float(x) for x in highs],
+            "low": [float(x) for x in lows]
+        }
 
     except Exception:
-
         return None
 
 
 # ============================================================
-# 🔢 RSI
+# RSI
 # ============================================================
 
 def calculate_rsi(closes, period=14):
 
     if len(closes) < period + 2:
-        return None
+        return 50
 
     gains = []
     losses = []
 
     for i in range(1, len(closes)):
 
-        diff = closes[i] - closes[i - 1]
+        change = closes[i] - closes[i - 1]
 
-        if diff > 0:
-            gains.append(diff)
+        if change >= 0:
+            gains.append(change)
             losses.append(0)
-
         else:
             gains.append(0)
-            losses.append(abs(diff))
+            losses.append(abs(change))
 
-    avg_gain = sum(
-        gains[:period]
-    ) / period
-
-    avg_loss = sum(
-        losses[:period]
-    ) / period
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
 
     for i in range(period, len(gains)):
 
         avg_gain = (
-            avg_gain * (period - 1)
-            + gains[i]
+            avg_gain * (period - 1) + gains[i]
         ) / period
 
         avg_loss = (
-            avg_loss * (period - 1)
-            + losses[i]
+            avg_loss * (period - 1) + losses[i]
         ) / period
 
     if avg_loss == 0:
@@ -299,614 +334,433 @@ def calculate_rsi(closes, period=14):
 
 
 # ============================================================
-# 📈 EMA
+# YÜZDE DEĞİŞİM
 # ============================================================
 
-def calculate_ema(values, period=20):
+def pct_change(closes, candles):
 
-    if len(values) < period:
-        return None
-
-    multiplier = 2 / (period + 1)
-
-    ema = sum(
-        values[:period]
-    ) / period
-
-    for price in values[period:]:
-
-        ema = (
-            price - ema
-        ) * multiplier + ema
-
-    return ema
-
-
-# ============================================================
-# 📊 HACİM ORANI
-# ============================================================
-
-def calculate_volume_ratio(volumes):
-
-    if len(volumes) < 21:
+    if len(closes) <= candles:
         return 0
+
+    old = closes[-candles - 1]
+    new = closes[-1]
+
+    if old == 0:
+        return 0
+
+    return ((new - old) / old) * 100
+
+
+# ============================================================
+# HACİM ORANI
+# ============================================================
+
+def volume_ratio(volumes):
+
+    if len(volumes) < 25:
+        return 1
 
     current = volumes[-1]
 
-    average = sum(
-        volumes[-21:-1]
-    ) / 20
+    avg = sum(volumes[-21:-1]) / 20
 
-    if average <= 0:
-        return 0
+    if avg <= 0:
+        return 1
 
-    return current / average
+    return current / avg
 
 
 # ============================================================
-# ₿ BTC YÖNÜ
+# BTC YÖNÜ
 # ============================================================
 
 def get_btc_direction():
 
-    results = {}
+    data15 = get_klines("BTC_USDT", "Min15", 80)
+    data1h = get_klines("BTC_USDT", "Min60", 80)
+    data4h = get_klines("BTC_USDT", "Hour4", 80)
 
-    for interval in [
-        "Min15",
-        "Min60",
-        "Hour4"
-    ]:
+    if not data15 or not data1h or not data4h:
 
-        data = get_klines(
-            "BTC_USDT",
-            interval,
-            100
-        )
+        return "NEUTRAL", 0, 0, 0
 
-        if not data:
-            return "NEUTRAL", results
+    c15 = data15["close"]
+    c1h = data1h["close"]
+    c4h = data4h["close"]
 
-        try:
+    p15 = pct_change(c15, 4)
+    p1h = pct_change(c1h, 4)
+    p4h = pct_change(c4h, 3)
 
-            closes = [
-                float(x)
-                for x in data["close"]
-            ]
+    score_long = 0
+    score_short = 0
 
-            rsi = calculate_rsi(closes)
+    if p15 > 0:
+        score_long += 1
+    else:
+        score_short += 1
 
-            ema20 = calculate_ema(
-                closes,
-                20
-            )
+    if p1h > 0:
+        score_long += 1
+    else:
+        score_short += 1
 
-            price = closes[-1]
+    if p4h > 0:
+        score_long += 1
+    else:
+        score_short += 1
 
-            change = (
-                (closes[-1] - closes[-2])
-                / closes[-2]
-            ) * 100
-
-            results[interval] = {
-                "rsi": rsi,
-                "ema": ema20,
-                "price": price,
-                "change": change
-            }
-
-        except Exception:
-            return "NEUTRAL", results
-
-    bullish = 0
-    bearish = 0
-
-    # --------------------------------------------------------
-    # 15M
-    # --------------------------------------------------------
-
-    x = results["Min15"]
-
-    if x["price"] > x["ema"]:
-        bullish += 1
-
-    if x["rsi"] > 50:
-        bullish += 1
-
-    if x["change"] > 0:
-        bullish += 1
-
-    if x["price"] < x["ema"]:
-        bearish += 1
-
-    if x["rsi"] < 50:
-        bearish += 1
-
-    if x["change"] < 0:
-        bearish += 1
-
-    # --------------------------------------------------------
-    # 1H
-    # --------------------------------------------------------
-
-    x = results["Min60"]
-
-    if x["price"] > x["ema"]:
-        bullish += 2
-
-    if x["rsi"] > 50:
-        bullish += 2
-
-    if x["change"] > 0:
-        bullish += 1
-
-    if x["price"] < x["ema"]:
-        bearish += 2
-
-    if x["rsi"] < 50:
-        bearish += 2
-
-    if x["change"] < 0:
-        bearish += 1
-
-    # --------------------------------------------------------
-    # 4H
-    # --------------------------------------------------------
-
-    x = results["Hour4"]
-
-    if x["price"] > x["ema"]:
-        bullish += 3
-
-    if x["rsi"] > 50:
-        bullish += 2
-
-    if x["change"] > 0:
-        bullish += 1
-
-    if x["price"] < x["ema"]:
-        bearish += 3
-
-    if x["rsi"] < 50:
-        bearish += 2
-
-    if x["change"] < 0:
-        bearish += 1
-
-    # --------------------------------------------------------
-    # YÖN
-    # --------------------------------------------------------
-
-    if bullish >= bearish + 3:
+    if score_long >= 2:
         direction = "BULLISH"
 
-    elif bearish >= bullish + 3:
+    elif score_short >= 2:
         direction = "BEARISH"
 
     else:
         direction = "NEUTRAL"
 
-    return direction, results
+    return direction, p15, p1h, p4h
 
 
 # ============================================================
-# 🔍 COIN ANALİZİ
+# COIN ANALİZİ
 # ============================================================
 
-def analyze_symbol(symbol):
+def analyze_coin(symbol, btc_direction):
 
     try:
 
-        data15 = get_klines(
-            symbol,
-            "Min15",
-            100
-        )
+        # Stock tekrar kontrol
+        if is_stock_symbol(symbol):
+            return None
 
-        data1h = get_klines(
-            symbol,
-            "Min60",
-            100
-        )
-
-        data4h = get_klines(
-            symbol,
-            "Hour4",
-            100
-        )
+        data15 = get_klines(symbol, "Min15", 80)
+        data1h = get_klines(symbol, "Min60", 80)
+        data4h = get_klines(symbol, "Hour4", 80)
 
         if not data15 or not data1h or not data4h:
             return None
 
-        close15 = [
-            float(x)
-            for x in data15["close"]
-        ]
+        c15 = data15["close"]
+        c1h = data1h["close"]
+        c4h = data4h["close"]
 
-        volume15 = [
-            float(x)
-            for x in data15["vol"]
-        ]
+        v15 = data15["volume"]
 
-        close1h = [
-            float(x)
-            for x in data1h["close"]
-        ]
+        price = c15[-1]
 
-        close4h = [
-            float(x)
-            for x in data4h["close"]
-        ]
+        rsi15 = calculate_rsi(c15)
+        rsi1h = calculate_rsi(c1h)
+        rsi4h = calculate_rsi(c4h)
 
-        # ----------------------------------------------------
-        # RSI
-        # ----------------------------------------------------
+        change15 = pct_change(c15, 4)
+        change1h = pct_change(c1h, 4)
+        change4h = pct_change(c4h, 3)
 
-        rsi15 = calculate_rsi(
-            close15
-        )
+        vol = volume_ratio(v15)
 
-        rsi1h = calculate_rsi(
-            close1h
-        )
-
-        rsi4h = calculate_rsi(
-            close4h
-        )
-
-        if None in [
-            rsi15,
-            rsi1h,
-            rsi4h
-        ]:
-            return None
-
-        # ----------------------------------------------------
-        # FİYAT
-        # ----------------------------------------------------
-
-        price = close15[-1]
-
-        change15 = (
-            (close15[-1] - close15[-2])
-            / close15[-2]
-        ) * 100
-
-        # ----------------------------------------------------
-        # HACİM
-        # ----------------------------------------------------
-
-        volume_ratio = calculate_volume_ratio(
-            volume15
-        )
-
-        # ----------------------------------------------------
-        # EMA
-        # ----------------------------------------------------
-
-        ema20_15 = calculate_ema(
-            close15,
-            20
-        )
-
-        ema20_1h = calculate_ema(
-            close1h,
-            20
-        )
-
-        # ----------------------------------------------------
-        # LONG SKORU
-        # ----------------------------------------------------
+        # ====================================================
+        # LONG SKOR
+        # ====================================================
 
         long_score = 0
 
-        if rsi15 >= LONG_RSI_MIN:
+        # 4H dip / dönüş
+        if 30 <= rsi4h <= 48:
             long_score += 2
 
-        if rsi15 <= LONG_RSI_MAX:
+        elif 48 < rsi4h <= 58:
+            long_score += 1
+
+        # 1H toparlanma
+        if rsi1h >= 45:
             long_score += 1
 
         if rsi1h > 50:
+            long_score += 1
+
+        # 15M momentum
+        if rsi15 >= 50:
+            long_score += 1
+
+        if change15 > 0:
+            long_score += 1
+
+        if change1h > 0:
+            long_score += 1
+
+        # Hacim
+        if vol >= 1.15:
+            long_score += 1
+
+        # BTC yön
+        if btc_direction == "BULLISH":
             long_score += 2
 
-        if rsi4h > 50:
-            long_score += 1
+        elif btc_direction == "BEARISH":
+            long_score -= 2
 
-        if price > ema20_15:
-            long_score += 1
-
-        if close1h[-1] > ema20_1h:
-            long_score += 1
-
-        if volume_ratio >= VOLUME_RATIO_MIN:
-            long_score += 1
-
-        if change15 >= PRICE_CHANGE_MIN:
-            long_score += 1
-
-        # ----------------------------------------------------
-        # SHORT SKORU
-        # ----------------------------------------------------
+        # ====================================================
+        # SHORT SKOR
+        # ====================================================
 
         short_score = 0
 
-        if rsi15 <= SHORT_RSI_MAX:
-            short_score += 2
-
-        if rsi15 >= SHORT_RSI_MIN:
+        # 4H zayıflık
+        if 52 <= rsi4h <= 70:
             short_score += 1
 
+        if rsi4h > 70:
+            short_score += 2
+
+        # 1H
         if rsi1h < 50:
+            short_score += 1
+
+        if rsi1h < 42:
+            short_score += 1
+
+        # 15M
+        if rsi15 < 50:
+            short_score += 1
+
+        if change15 < 0:
+            short_score += 1
+
+        if change1h < 0:
+            short_score += 1
+
+        # Hacim
+        if vol >= 1.15:
+            short_score += 1
+
+        # BTC
+        if btc_direction == "BEARISH":
             short_score += 2
 
-        if rsi4h < 50:
-            short_score += 1
+        elif btc_direction == "BULLISH":
+            short_score -= 2
 
-        if price < ema20_15:
-            short_score += 1
+        # ====================================================
+        # PUMP ÖNCESİ LONG ÖNCELİĞİ
+        # ====================================================
 
-        if close1h[-1] < ema20_1h:
-            short_score += 1
+        # Çok sert yükselmiş coinleri kovalamıyoruz
+        if change4h > 12:
+            long_score -= 2
 
-        if volume_ratio >= VOLUME_RATIO_MIN:
-            short_score += 1
+        if change1h > 8:
+            long_score -= 2
 
-        if change15 <= -PRICE_CHANGE_MIN:
-            short_score += 1
+        # Aşırı şişmiş RSI
+        if rsi15 > 78:
+            long_score -= 2
+
+        if rsi1h > 75:
+            long_score -= 1
+
+        # ====================================================
+        # YÖN
+        # ====================================================
+
+        if long_score >= MIN_SCORE and long_score > short_score:
+
+            direction = "LONG"
+            score = long_score
+
+        elif short_score >= MIN_SCORE and short_score > long_score:
+
+            direction = "SHORT"
+            score = short_score
+
+        else:
+
+            return None
+
+        # ====================================================
+        # GİRİŞ / STOP / TP
+        # ====================================================
+
+        if direction == "LONG":
+
+            entry = price
+
+            stop = entry * 0.978
+
+            tp1 = entry * 1.022
+            tp2 = entry * 1.045
+            tp3 = entry * 1.070
+
+        else:
+
+            entry = price
+
+            stop = entry * 1.022
+
+            tp1 = entry * 0.978
+            tp2 = entry * 0.955
+            tp3 = entry * 0.930
 
         return {
-            "symbol": symbol,
-            "price": price,
+            "symbol": symbol.replace("_USDT", "/USDT"),
+            "direction": direction,
+            "score": min(score, 10),
+            "entry": entry,
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
             "rsi15": rsi15,
             "rsi1h": rsi1h,
             "rsi4h": rsi4h,
-            "volume_ratio": volume_ratio,
-            "change15": change15,
-            "long_score": long_score,
-            "short_score": short_score
+            "volume": vol,
+            "btc": btc_direction
         }
 
     except Exception:
-
         return None
 
 
 # ============================================================
-# 💰 TP / STOP
+# FİYAT FORMAT
 # ============================================================
 
-def calculate_levels(price, direction):
+def fmt_price(price):
 
-    if direction == "LONG":
+    if price >= 1000:
+        return f"{price:.2f}"
 
-        stop = price * 0.985
+    if price >= 100:
+        return f"{price:.3f}"
 
-        tp1 = price * 1.020
-        tp2 = price * 1.040
-        tp3 = price * 1.065
+    if price >= 10:
+        return f"{price:.4f}"
+
+    if price >= 1:
+        return f"{price:.5f}"
+
+    if price >= 0.1:
+        return f"{price:.6f}"
+
+    if price >= 0.01:
+        return f"{price:.7f}"
+
+    if price >= 0.001:
+        return f"{price:.8f}"
+
+    return f"{price:.10f}"
+
+
+# ============================================================
+# TELEGRAM MESAJI
+# ============================================================
+
+def create_message(signal):
+
+    if signal["direction"] == "LONG":
+
+        title = "🟢 LONG SİNYAL"
 
     else:
 
-        stop = price * 1.015
-
-        tp1 = price * 0.980
-        tp2 = price * 0.960
-        tp3 = price * 0.935
-
-    return stop, tp1, tp2, tp3
-
-
-# ============================================================
-# 📨 TELEGRAM MESAJI
-# ============================================================
-
-def format_signal(data, direction, btc_direction):
-
-    symbol = data["symbol"]
-
-    price = data["price"]
-
-    score = (
-        data["long_score"]
-        if direction == "LONG"
-        else data["short_score"]
-    )
-
-    stop, tp1, tp2, tp3 = calculate_levels(
-        price,
-        direction
-    )
-
-    if direction == "LONG":
-        emoji = "🟢"
-    else:
-        emoji = "🔴"
+        title = "🔴 SHORT SİNYAL"
 
     message = f"""
-{emoji} <b>{direction} SİNYAL</b>
+{title}
 ━━━━━━━━━━━━━━━━
 
-💎 <b>{symbol.replace("_", "/")}</b>
+💎 {signal["symbol"]}
 
-⭐ Güç: <b>{score}/10</b>
+⭐ Güç: {signal["score"]}/10
 
-🎯 Giriş: <b>{price:.8f}</b>
-🛑 Stop: <b>{stop:.8f}</b>
+🎯 Giriş: {fmt_price(signal["entry"])}
+🛑 Stop: {fmt_price(signal["stop"])}
 
-💰 TP1: <b>{tp1:.8f}</b>
-💰 TP2: <b>{tp2:.8f}</b>
-💰 TP3: <b>{tp3:.8f}</b>
+💰 TP1: {fmt_price(signal["tp1"])}
+💰 TP2: {fmt_price(signal["tp2"])}
+💰 TP3: {fmt_price(signal["tp3"])}
 
-📊 RSI 15M: {data["rsi15"]:.1f}
-📊 RSI 1H: {data["rsi1h"]:.1f}
-📊 RSI 4H: {data["rsi4h"]:.1f}
+📊 RSI 15M: {signal["rsi15"]:.1f}
+📊 RSI 1H: {signal["rsi1h"]:.1f}
+📊 RSI 4H: {signal["rsi4h"]:.1f}
 
-🔥 Hacim: {data["volume_ratio"]:.1f}x
-📈 15M: {data["change15"]:+.2f}%
+🔥 Hacim: {signal["volume"]:.1f}x
 
-🌐 BTC: {btc_direction}
+🌐 BTC: {signal["btc"]}
 
 ━━━━━━━━━━━━━━━━
-⚠️ Otomatik teknik tarama.
+⚠️ Sinyal otomatik teknik taramadır.
 """
 
     return message.strip()
 
 
 # ============================================================
-# 🧠 SİNYAL GEÇMİŞİ
+# ANA RADAR
 # ============================================================
 
-HISTORY_FILE = "signal_history.json"
-
-
-def load_history():
-
-    try:
-
-        with open(
-            HISTORY_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return json.load(f)
-
-    except Exception:
-
-        return {}
-
-
-def save_history(history):
-
-    try:
-
-        with open(
-            HISTORY_FILE,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            json.dump(
-                history,
-                f,
-                indent=2,
-                ensure_ascii=False
-            )
-
-    except Exception as e:
-
-        print(
-            "Geçmiş kaydedilemedi:",
-            e
-        )
-
-
-# ============================================================
-# 🚀 ANA RADAR
-# ============================================================
-
-def run_radar():
+def main():
 
     print()
     print("🚀 MEXC PUMP RADAR 13.0")
-    print("🌐 SADECE FUTURES USDT")
-    print("🚫 STOCKLAR TAMAMEN KALDIRILDI")
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    # --------------------------------------------------------
-    # BTC
-    # --------------------------------------------------------
-
+    print("🌐 BTC yön filtresi aktif")
+    print("🟢 BULLISH = LONG")
+    print("🔴 BEARISH = SHORT")
+    print("⚪ NEUTRAL = İŞLEM YOK")
+    print()
+    print("🚫 STOCK FİLTRESİ AKTİF")
+    print("🚫 SPOT FİLTRESİ AKTİF")
+    print("🚫 TOKENIZED STOCK FİLTRESİ AKTİF")
+    print()
     print("🌐 BTC yönü analiz ediliyor...")
 
-    btc_direction, btc_data = get_btc_direction()
+    btc_direction, btc15, btc1h, btc4h = get_btc_direction()
 
-    print(
-        f"🌐 BTC YÖNÜ: {btc_direction}"
-    )
+    print("=" * 40)
 
-    if btc_data:
+    print(f"🌐 BTC YÖNÜ: {btc_direction}")
+    print(f"15M: {btc15:+.2f}%")
+    print(f"1H: {btc1h:+.2f}%")
+    print(f"4H: {btc4h:+.2f}%")
 
-        for interval, label in [
-            ("Min15", "15M"),
-            ("Min60", "1H"),
-            ("Hour4", "4H")
-        ]:
-
-            x = btc_data.get(interval)
-
-            if x:
-
-                print(
-                    f"{label}: "
-                    f"{x['change']:+.2f}% "
-                    f"| RSI {x['rsi']:.1f}"
-                )
-
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    # --------------------------------------------------------
-    # BTC NEUTRAL
-    # --------------------------------------------------------
-
-    if btc_direction == "NEUTRAL":
-
-        print(
-            "⚪ BTC NEUTRAL → İŞLEM YOK"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # FUTURES
-    # --------------------------------------------------------
+    print("=" * 40)
 
     symbols = get_futures_symbols()
 
-    print(
-        f"📊 Futures kontrat: "
-        f"{len(symbols)}"
-    )
+    print(f"📊 Futures kontrat: {len(symbols)}")
 
-    if not symbols:
+    # Ek güvenlik
+    symbols = [
+        s for s in symbols
+        if s.endswith("_USDT")
+        and not is_stock_symbol(s)
+    ]
 
-        print(
-            "❌ Futures bulunamadı."
-        )
+    print(f"🧹 Stock sonrası: {len(symbols)}")
+    print(f"🔎 Taranacak: {len(symbols)}")
 
-        return
+    history = load_history()
 
-    print(
-        f"🔎 Tarama: {len(symbols)}"
-    )
+    signals = []
 
-    candidates = []
+    completed = 0
 
-    # --------------------------------------------------------
-    # PARALEL TARAMA
-    # --------------------------------------------------------
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
 
         futures = {
             executor.submit(
-                analyze_symbol,
-                symbol
+                analyze_coin,
+                symbol,
+                btc_direction
             ): symbol
             for symbol in symbols
         }
 
-        completed = 0
-
-        for future in as_completed(
-            futures
-        ):
+        for future in as_completed(futures):
 
             completed += 1
 
-            if completed % 25 == 0:
+            if completed % 25 == 0 or completed == len(symbols):
 
                 print(
                     f"İlerleme: "
@@ -915,170 +769,86 @@ def run_radar():
 
             try:
 
-                data = future.result()
+                result = future.result()
 
-                if not data:
-                    continue
-
-                # =================================================
-                # BTC BULLISH → SADECE LONG
-                # =================================================
-
-                if btc_direction == "BULLISH":
-
-                    if (
-                        data["long_score"]
-                        >= MIN_SCORE
-                    ):
-
-                        candidates.append(
-                            (
-                                data["long_score"],
-                                "LONG",
-                                data
-                            )
-                        )
-
-                # =================================================
-                # BTC BEARISH → SADECE SHORT
-                # =================================================
-
-                elif btc_direction == "BEARISH":
-
-                    if (
-                        data["short_score"]
-                        >= MIN_SCORE
-                    ):
-
-                        candidates.append(
-                            (
-                                data["short_score"],
-                                "SHORT",
-                                data
-                            )
-                        )
+                if result:
+                    signals.append(result)
 
             except Exception:
-                continue
+                pass
 
-    # --------------------------------------------------------
+    # ========================================================
     # SKOR SIRALAMA
-    # --------------------------------------------------------
+    # ========================================================
 
-    candidates.sort(
-        key=lambda x: x[0],
+    signals.sort(
+        key=lambda x: x["score"],
         reverse=True
     )
 
     print()
-    print(
-        f"🎯 Güçlü sinyal: "
-        f"{len(candidates)}"
-    )
+    print(f"🎯 Güçlü sinyal: {len(signals)}")
 
-    # --------------------------------------------------------
-    # GEÇMİŞ
-    # --------------------------------------------------------
-
-    history = load_history()
+    # ========================================================
+    # TELEGRAM
+    # ========================================================
 
     sent = 0
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+    now = time.time()
 
-    for score, direction, data in candidates:
+    for signal in signals:
 
-        if sent >= MAX_SIGNALS:
-            break
+        symbol = signal["symbol"]
+        direction = signal["direction"]
 
-        symbol = data["symbol"]
+        key = f"{symbol}_{direction}"
 
-        history_key = (
-            f"{symbol}_{direction}"
-        )
+        # ----------------------------------------------------
+        # COOLDOWN
+        # ----------------------------------------------------
 
-        # Aynı sinyali tekrar gönderme
-        if history_key in history:
+        last_time = history.get(key, 0)
+
+        if now - last_time < COOLDOWN_HOURS * 3600:
 
             print(
-                f"⏭️ Tekrar: "
+                f"⏳ Atlandı: "
                 f"{symbol} "
-                f"{direction}"
+                f"(cooldown)"
             )
 
             continue
 
-        print(
-            f"🎯 {symbol} "
-            f"{direction} "
-            f"{score}/10"
-        )
+        message = create_message(signal)
 
-        message = format_signal(
-            data,
-            direction,
-            btc_direction
-        )
+        if telegram_send(message):
 
-        if send_telegram(message):
-
-            history[history_key] = {
-                "time": time.time(),
-                "direction": direction,
-                "score": score
-            }
+            history[key] = now
 
             sent += 1
+
+            print(
+                f"📨 Telegram: "
+                f"{symbol} "
+                f"{direction} "
+                f"{signal['score']}/10"
+            )
+
+        # Telegram'ı boğmamak için
+        time.sleep(0.4)
 
     save_history(history)
 
     print()
-    print(
-        f"📨 Telegram gönderilen: "
-        f"{sent}"
-    )
-
-    print(
-        "🏁 Tarama tamamlandı."
-    )
+    print(f"📨 Telegram gönderilen: {sent}")
+    print("🏁 Tarama tamamlandı.")
+    print()
 
 
 # ============================================================
-# 🔁 SÜREKLİ ÇALIŞMA
-# ============================================================
-
-def main():
-
-    while True:
-
-        try:
-
-            run_radar()
-
-        except Exception as e:
-
-            print(
-                "❌ ANA HATA:",
-                e
-            )
-
-        print()
-        print(
-            f"⏳ {SCAN_INTERVAL} saniye "
-            f"sonra yeni tarama..."
-        )
-
-        time.sleep(
-            SCAN_INTERVAL
-        )
-
-
-# ============================================================
-# ▶️ BAŞLAT
+# START
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
