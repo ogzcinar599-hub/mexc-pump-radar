@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PUMP RADAR 16.0
+# 🚀 MEXC PUMP RADAR 17.0
 #
 # SADECE:
 # ✅ MEXC USDT FUTURES
@@ -23,10 +23,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ❌ SPOT
 # ❌ ZAYIF SİNYAL
 #
-# YENİ:
-# 🔥 Minimum hacim: 1.70x
+# YENİ HARD FİLTRELER:
+# 🔥 Minimum hacim: 2.90x
+# 📊 Minimum RSI 4H: 49.0
 # ⭐ Minimum skor: 8/10
-# 🚫 Zayıf sinyal Telegram'a gönderilmez
+#
+# 2.90x hacim ALTINDA → SİNYAL YOK
+# RSI 4H 49 ALTINDA → SİNYAL YOK
 # ============================================================
 
 
@@ -39,13 +42,18 @@ HISTORY_FILE = "signal_history.json"
 
 MAX_WORKERS = 12
 
+
 # ============================================================
 # GÜÇLÜ SİNYAL FİLTRELERİ
 # ============================================================
 
 MIN_SCORE = 8
 
-MIN_VOLUME = 1.70
+# 🔥 YENİ: 2.90x altı kesinlikle gönderilmez
+MIN_VOLUME = 2.90
+
+# 📊 YENİ: 4H RSI 49 altı kesinlikle gönderilmez
+MIN_RSI_4H = 49.0
 
 COOLDOWN_HOURS = 6
 
@@ -483,11 +491,13 @@ def pct_change(
 # Son 3 mumun en güçlü hacmini alıyoruz.
 #
 # Örnek:
-# Son mum 0.9x
-# Önceki mum 1.9x
+# Son mum 2.0x
+# Önceki mum 4.5x
 #
-# Sistem 1.9x'i görebilir.
-# Böylece pump başlangıcındaki hacim kaçmaz.
+# Sistem 4.5x'i görebilir.
+#
+# YENİ HARD FİLTRE:
+# 2.90x ALTINDA SİNYAL YOK
 # ============================================================
 
 def volume_ratio(volumes):
@@ -711,10 +721,27 @@ def analyze_coin(
         # ====================================================
         # 🚨 HARD HACİM FİLTRESİ
         #
-        # 1.70x altı kesinlikle sinyal yok
+        # 2.90x altı kesinlikle sinyal yok
         # ====================================================
 
         if vol < MIN_VOLUME:
+
+            return None
+
+        # ====================================================
+        # 🚨 HARD 4H RSI FİLTRESİ
+        #
+        # RSI 4H 49 altı kesinlikle sinyal yok
+        #
+        # ÖRNEK:
+        # 48.9 → ❌
+        # 47.7 → ❌
+        # 46.3 → ❌
+        # 49.0 → ✅
+        # 55.5 → ✅
+        # ====================================================
+
+        if rsi4h < MIN_RSI_4H:
 
             return None
 
@@ -768,12 +795,12 @@ def analyze_coin(
         # HACİM
         # ----------------------------------------------------
 
-        if vol >= 1.70:
+        if vol >= 2.90:
 
             long_score += 1
 
         # Çok güçlü hacim
-        if vol >= 2.50:
+        if vol >= 5.00:
 
             long_score += 1
 
@@ -859,11 +886,11 @@ def analyze_coin(
         # HACİM
         # ----------------------------------------------------
 
-        if vol >= 1.70:
+        if vol >= 2.90:
 
             short_score += 1
 
-        if vol >= 2.50:
+        if vol >= 5.00:
 
             short_score += 1
 
@@ -911,6 +938,7 @@ def analyze_coin(
 
         # BTC ile tamamen ters yönlü sinyal
         # ekstra güvenlik
+
         if (
             direction == "LONG"
             and btc_direction == "BEARISH"
@@ -1122,7 +1150,7 @@ def main():
     print()
 
     print(
-        "🚀 MEXC PUMP RADAR 16.0"
+        "🚀 MEXC PUMP RADAR 17.0"
     )
 
     print(
@@ -1160,6 +1188,11 @@ def main():
     print(
         f"🔥 Minimum hacim: "
         f"{MIN_VOLUME:.2f}x"
+    )
+
+    print(
+        f"📊 Minimum RSI 4H: "
+        f"{MIN_RSI_4H:.1f}"
     )
 
     print(
@@ -1334,6 +1367,8 @@ def main():
             f"🔥 {signal['symbol']} "
             f"{signal['direction']} "
             f"{signal['score']}/10 "
+            f"RSI4H: "
+            f"{signal['rsi4h']:.1f} "
             f"Hacim: "
             f"{signal['volume']:.1f}x"
         )
@@ -1400,7 +1435,17 @@ def main():
             print(
                 f"🚫 Atlandı: "
                 f"{symbol} "
-                f"(zayıf hacim)"
+                f"(hacim < 2.90x)"
+            )
+
+            continue
+
+        if signal["rsi4h"] < MIN_RSI_4H:
+
+            print(
+                f"🚫 Atlandı: "
+                f"{symbol} "
+                f"(RSI 4H < 49)"
             )
 
             continue
@@ -1424,6 +1469,8 @@ def main():
                 f"{symbol} "
                 f"{direction} "
                 f"{signal['score']}/10 "
+                f"RSI4H "
+                f"{signal['rsi4h']:.1f} "
                 f"Hacim "
                 f"{signal['volume']:.1f}x"
             )
