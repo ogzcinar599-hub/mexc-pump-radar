@@ -7,10 +7,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PUMP RADAR 25.3
+# 🚀 MEXC PUMP RADAR 25.4
 #
 # AMAÇ:
-# AZ AMA KALİTELİ SİNYAL
+# PUMP BAŞLAMADAN ÖNCE GÜÇLÜ LONG ADAYLARI BULMAK
+#
+# 25.3'E GÖRE:
+# - FİLTRELER BİRAZ GEVŞETİLDİ
+# - DAHA FAZLA FIRSAT YAKALANACAK
+# - ZAYIF COINLER HALA ELENECEK
 #
 # TELEGRAM:
 # COIN
@@ -31,33 +36,53 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = "https://contract.mexc.com"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID"
+)
 
 HISTORY_FILE = "signal_history.json"
 
-# Paralel tarama
+
+# ============================================================
+# TARAMA
+# ============================================================
+
 MAX_WORKERS = 4
 
-# API
-REQUEST_TIMEOUT = 12
-RETRIES = 4
-RETRY_BASE = 1.5
-
-# API istekleri arası minimum süre
-MIN_API_INTERVAL = 0.12
-
-# Aday havuzu
 MAX_CANDIDATES = 350
 
-# Telegram maksimum sinyal
 MAX_TELEGRAM = 3
 
-# Güçlü sinyal eşiği
-MIN_SCORE = 75
 
-# Aynı coin tekrar sinyal vermesin
-COOLDOWN_HOURS = 12
+# ============================================================
+# ANA SKOR
+# ============================================================
+
+MIN_SCORE = 68
+
+
+# ============================================================
+# COOLDOWN
+# ============================================================
+
+COOLDOWN_HOURS = 8
+
+
+# ============================================================
+# API
+# ============================================================
+
+REQUEST_TIMEOUT = 12
+
+RETRIES = 4
+
+RETRY_BASE = 1.5
+
+MIN_API_INTERVAL = 0.12
 
 
 # ============================================================
@@ -65,6 +90,7 @@ COOLDOWN_HOURS = 12
 # ============================================================
 
 api_lock = threading.Lock()
+
 last_api_request = 0.0
 
 
@@ -96,11 +122,12 @@ def stat_add(key):
     with stats_lock:
 
         if key in stats:
+
             stats[key] += 1
 
 
 # ============================================================
-# API WAIT
+# API BEKLEME
 # ============================================================
 
 def api_wait():
@@ -117,13 +144,16 @@ def api_wait():
         )
 
         if wait_time > 0:
-            time.sleep(wait_time)
+
+            time.sleep(
+                wait_time
+            )
 
         last_api_request = time.time()
 
 
 # ============================================================
-# HTTP SESSION
+# SESSION
 # ============================================================
 
 session = requests.Session()
@@ -163,8 +193,8 @@ def request_json(
                 )
 
                 print(
-                    f"⚠️ 429 rate limit - "
-                    f"{wait:.1f}s bekleniyor"
+                    f"⚠️ 429 rate limit "
+                    f"→ {wait:.1f}s"
                 )
 
                 time.sleep(wait)
@@ -199,7 +229,7 @@ def request_json(
             data = response.json()
 
             # ------------------------------------------------
-            # MEXC API ERROR
+            # MEXC ERROR
             # ------------------------------------------------
 
             if isinstance(
@@ -274,6 +304,7 @@ def load_history():
         if not os.path.exists(
             HISTORY_FILE
         ):
+
             return {}
 
         with open(
@@ -288,9 +319,11 @@ def load_history():
                 data,
                 dict
             ):
+
                 return data
 
     except Exception:
+
         pass
 
     return {}
@@ -333,6 +366,7 @@ def is_cooldown(
     )
 
     if not last:
+
         return False
 
     try:
@@ -368,6 +402,7 @@ def get_futures_symbols():
     )
 
     if not data:
+
         return []
 
     raw = data.get(
@@ -410,18 +445,21 @@ def get_futures_symbols():
             ).upper()
 
             if state != 0:
+
                 continue
 
             if quote_coin != "USDT":
+
                 continue
 
             if not symbol.endswith(
                 "_USDT"
             ):
+
                 continue
 
             # ------------------------------------------------
-            # STOCK / ETF / INDEX ELE
+            # STOCK / ETF / INDEX
             # ------------------------------------------------
 
             bad_words = [
@@ -439,6 +477,7 @@ def get_futures_symbols():
                 word in symbol
                 for word in bad_words
             ):
+
                 continue
 
             symbols.append(
@@ -446,6 +485,7 @@ def get_futures_symbols():
             )
 
         except Exception:
+
             continue
 
     return sorted(
@@ -469,6 +509,7 @@ def get_all_tickers():
     )
 
     if not data:
+
         return []
 
     raw = data.get(
@@ -495,6 +536,7 @@ def get_all_tickers():
         raw,
         list
     ):
+
         return []
 
     return raw
@@ -504,7 +546,7 @@ def get_all_tickers():
 # KLINE
 #
 # ÖNEMLİ:
-# MEXC Futures Kline start/end = SANİYE
+# START / END = SANİYE
 # ============================================================
 
 def get_klines(
@@ -527,11 +569,12 @@ def get_klines(
     )
 
     if not minutes:
+
         return None
 
-    # ========================================================
-    # SANİYE KULLANIYORUZ
-    # ========================================================
+    # --------------------------------------------------------
+    # SANİYE
+    # --------------------------------------------------------
 
     now_sec = int(
         time.time()
@@ -566,6 +609,7 @@ def get_klines(
     )
 
     if not data:
+
         return None
 
     raw = data.get(
@@ -573,10 +617,11 @@ def get_klines(
     )
 
     if not raw:
+
         return None
 
     # ========================================================
-    # DICT FORMAT
+    # DICT
     # ========================================================
 
     if isinstance(
@@ -626,6 +671,7 @@ def get_klines(
             )
 
             if n < 20:
+
                 return None
 
             candles = []
@@ -666,6 +712,7 @@ def get_klines(
                     continue
 
             if len(candles) < 20:
+
                 return None
 
             return candles[-limit:]
@@ -675,7 +722,7 @@ def get_klines(
             return None
 
     # ========================================================
-    # LIST FORMAT
+    # LIST
     # ========================================================
 
     if isinstance(
@@ -782,6 +829,7 @@ def get_klines(
                 continue
 
         if len(candles) < 20:
+
             return None
 
         return candles[-limit:]
@@ -803,9 +851,11 @@ def calculate_rsi(
         or len(closes)
         < period + 1
     ):
+
         return None
 
     gains = []
+
     losses = []
 
     for i in range(
@@ -870,6 +920,7 @@ def calculate_rsi(
         ) / period
 
     if avg_loss == 0:
+
         return 100.0
 
     rs = (
@@ -877,9 +928,12 @@ def calculate_rsi(
         / avg_loss
     )
 
-    return 100 - (
+    return (
         100
-        / (1 + rs)
+        - (
+            100
+            / (1 + rs)
+        )
     )
 
 
@@ -896,6 +950,7 @@ def ema(
         not values
         or len(values) < period
     ):
+
         return None
 
     multiplier = (
@@ -938,6 +993,7 @@ def pct_change(
         or len(values)
         <= candles
     ):
+
         return 0.0
 
     old = values[
@@ -947,11 +1003,13 @@ def pct_change(
     new = values[-1]
 
     if old == 0:
+
         return 0.0
 
     return (
         (
-            new - old
+            new
+            - old
         )
         / old
         * 100
@@ -970,9 +1028,12 @@ def volume_ratio(
         not candles
         or len(candles) < 22
     ):
+
         return 0.0
 
-    current = candles[-1]["vol"]
+    current = candles[-1][
+        "vol"
+    ]
 
     previous = [
         x["vol"]
@@ -980,6 +1041,7 @@ def volume_ratio(
     ]
 
     if not previous:
+
         return 0.0
 
     avg = (
@@ -988,6 +1050,7 @@ def volume_ratio(
     )
 
     if avg <= 0:
+
         return 0.0
 
     return (
@@ -1008,6 +1071,7 @@ def volume_growth(
         not candles
         or len(candles) < 15
     ):
+
         return 0.0
 
     recent = [
@@ -1021,6 +1085,7 @@ def volume_growth(
     ]
 
     if not old:
+
         return 0.0
 
     recent_avg = (
@@ -1034,6 +1099,7 @@ def volume_growth(
     )
 
     if old_avg <= 0:
+
         return 0.0
 
     return (
@@ -1043,7 +1109,7 @@ def volume_growth(
 
 
 # ============================================================
-# SELLING PRESSURE
+# SATIŞ BASKISI
 # ============================================================
 
 def selling_pressure(
@@ -1051,21 +1117,26 @@ def selling_pressure(
 ):
 
     if not candles:
+
         return 1.0
 
     c = candles[-1]
 
     high = c["high"]
+
     low = c["low"]
 
     op = c["open"]
+
     close = c["close"]
 
     rng = (
-        high - low
+        high
+        - low
     )
 
     if rng <= 0:
+
         return 0.0
 
     upper_wick = (
@@ -1077,7 +1148,8 @@ def selling_pressure(
     )
 
     body = abs(
-        close - op
+        close
+        - op
     )
 
     # Büyük üst fitil
@@ -1091,7 +1163,8 @@ def selling_pressure(
     if close < op:
 
         red_body = (
-            op - close
+            op
+            - close
         )
 
         if red_body > (
@@ -1104,7 +1177,9 @@ def selling_pressure(
 
 
 # ============================================================
-# PUMP ALREADY
+# PUMP ZATEN BAŞLAMIŞ MI?
+#
+# BU FİLTRE SIKI KALIYOR
 # ============================================================
 
 def pump_already(
@@ -1119,6 +1194,7 @@ def pump_already(
         not candles15
         or not candles1h
     ):
+
         return True
 
     close15 = [
@@ -1147,38 +1223,44 @@ def pump_already(
     )
 
     # --------------------------------------------------------
-    # PUMP ÇOK İLERLEMİŞ
+    # ÇOK HIZLI PUMP
     # --------------------------------------------------------
 
     if move15_6 >= 7.5:
+
         return True
 
     if move15_12 >= 12:
+
         return True
 
     if move1h_4 >= 8:
+
         return True
 
     # --------------------------------------------------------
-    # RSI AŞIRI SICAK
+    # RSI AŞIRI ŞİŞMİŞ
     # --------------------------------------------------------
 
     if (
         rsi15 is not None
         and rsi15 >= 78
     ):
+
         return True
 
     if (
         rsi1h is not None
         and rsi1h >= 72
     ):
+
         return True
 
     if (
         rsi4h is not None
         and rsi4h >= 70
     ):
+
         return True
 
     return False
@@ -1308,6 +1390,7 @@ def timeframe_trend(
         not candles
         or len(candles) < 55
     ):
+
         return 0
 
     closes = [
@@ -1331,17 +1414,21 @@ def timeframe_trend(
         ema20 is None
         or ema50 is None
     ):
+
         return 0
 
     score = 0
 
     if price > ema20:
+
         score += 3
 
     if price > ema50:
+
         score += 3
 
     if ema20 > ema50:
+
         score += 2
 
     if pct_change(
@@ -1408,25 +1495,25 @@ def rsi_quality_score(
     # --------------------------------------------------------
 
     if (
-        54 <= rsi15 <= 65
+        53 <= rsi15 <= 65
     ):
 
         score += 7
 
     elif (
-        50 <= rsi15 < 54
+        48 <= rsi15 < 53
     ):
 
         score += 5
 
     elif (
-        65 < rsi15 <= 70
+        65 < rsi15 <= 71
     ):
 
         score += 5
 
     elif (
-        48 <= rsi15 < 50
+        47 <= rsi15 < 48
     ):
 
         score += 3
@@ -1436,25 +1523,25 @@ def rsi_quality_score(
     # --------------------------------------------------------
 
     if (
-        55 <= rsi1h <= 65
+        54 <= rsi1h <= 65
     ):
 
         score += 7
 
     elif (
-        52 <= rsi1h < 55
+        48 <= rsi1h < 54
     ):
 
         score += 5
 
     elif (
-        65 < rsi1h <= 68
+        65 < rsi1h <= 69
     ):
 
         score += 5
 
     elif (
-        50 <= rsi1h < 52
+        48 <= rsi1h < 49
     ):
 
         score += 3
@@ -1464,13 +1551,13 @@ def rsi_quality_score(
     # --------------------------------------------------------
 
     if (
-        50 <= rsi4h <= 62
+        49 <= rsi4h <= 62
     ):
 
         score += 6
 
     elif (
-        48 <= rsi4h < 50
+        45 <= rsi4h < 49
     ):
 
         score += 4
@@ -1510,7 +1597,10 @@ def volume_score(
 
     score = 0
 
+    # --------------------------------------------------------
     # 15M
+    # --------------------------------------------------------
+
     if vr15 >= 2.5:
 
         score += 8
@@ -1527,7 +1617,14 @@ def volume_score(
 
         score += 3
 
+    elif vr15 >= 1.10:
+
+        score += 2
+
+    # --------------------------------------------------------
     # 1H
+    # --------------------------------------------------------
+
     if vr1h >= 2.0:
 
         score += 5
@@ -1540,10 +1637,21 @@ def volume_score(
 
         score += 2
 
-    # Hacim gelişimi
+    elif vr1h >= 1.10:
+
+        score += 1
+
+    # --------------------------------------------------------
+    # HACİM GELİŞİYOR
+    # --------------------------------------------------------
+
     if growth15 >= 1.20:
 
         score += 2
+
+    elif growth15 >= 1.05:
+
+        score += 1
 
     return min(
         score,
@@ -1593,9 +1701,12 @@ def momentum_score(
 
     score = 0
 
+    # --------------------------------------------------------
     # 15M
+    # --------------------------------------------------------
+
     if (
-        0.4 <= m15 <= 4
+        0.2 <= m15 <= 4
     ):
 
         score += 4
@@ -1604,9 +1715,12 @@ def momentum_score(
 
         score += 2
 
+    # --------------------------------------------------------
     # 1H
+    # --------------------------------------------------------
+
     if (
-        0.5 <= m1h <= 6
+        0.3 <= m1h <= 6
     ):
 
         score += 4
@@ -1615,10 +1729,17 @@ def momentum_score(
 
         score += 2
 
+    # --------------------------------------------------------
     # 4H
+    # --------------------------------------------------------
+
     if m4h > 0:
 
         score += 2
+
+    elif m4h >= -0.5:
+
+        score += 1
 
     return (
         min(
@@ -1664,9 +1785,12 @@ def pre_pump_score(
 
     score = 0
 
-    # 15M sağlıklı hareket
+    # --------------------------------------------------------
+    # 15M
+    # --------------------------------------------------------
+
     if (
-        0.5 <= m15 <= 5
+        0.3 <= m15 <= 5
     ):
 
         score += 6
@@ -1677,9 +1801,12 @@ def pre_pump_score(
 
         score += 4
 
-    # 1H sağlıklı hareket
+    # --------------------------------------------------------
+    # 1H
+    # --------------------------------------------------------
+
     if (
-        0.5 <= m1h <= 7
+        0.3 <= m1h <= 7
     ):
 
         score += 5
@@ -1688,15 +1815,18 @@ def pre_pump_score(
 
         score += 3
 
-    # RSI erken bölge
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
+
     if (
-        52 <= rsi15 <= 68
+        50 <= rsi15 <= 68
     ):
 
         score += 2
 
     if (
-        53 <= rsi1h <= 68
+        51 <= rsi1h <= 68
     ):
 
         score += 2
@@ -1754,29 +1884,42 @@ def get_btc_state():
             3
         )
 
-        # Çok kötü
+        # ----------------------------------------------------
+        # ÇOK KÖTÜ
+        # ----------------------------------------------------
+
         if (
-            m15 < -1.2
-            and m1h < -2.0
+            m15 < -1.5
+            and m1h < -2.5
         ):
 
             return 0
 
-        # Negatif
+        # ----------------------------------------------------
+        # NEGATİF
+        # ----------------------------------------------------
+
         if (
-            m15 < -0.5
-            or m1h < -1.0
+            m15 < -0.7
+            or m1h < -1.2
         ):
 
             return 2
 
-        # Pozitif
+        # ----------------------------------------------------
+        # POZİTİF
+        # ----------------------------------------------------
+
         if (
             m15 >= 0
             and m1h >= 0
         ):
 
             return 5
+
+        # ----------------------------------------------------
+        # NÖTR
+        # ----------------------------------------------------
 
         return 3
 
@@ -1800,9 +1943,9 @@ def analyze_coin(
 
     try:
 
-        # ----------------------------------------------------
+        # ====================================================
         # KLINE
-        # ----------------------------------------------------
+        # ====================================================
 
         candles15 = get_klines(
             symbol,
@@ -1846,9 +1989,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
-        # CLOSE
-        # ----------------------------------------------------
+        # ====================================================
+        # CLOSES
+        # ====================================================
 
         close15 = [
             x["close"]
@@ -1875,9 +2018,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # RSI
-        # ----------------------------------------------------
+        # ====================================================
 
         rsi15 = calculate_rsi(
             close15
@@ -1903,17 +2046,27 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # RSI HARD FILTER
-        # ----------------------------------------------------
+        #
+        # 25.3:
+        # 15M 50
+        # 1H  52
+        # 4H  48
+        #
+        # 25.4:
+        # 15M 47
+        # 1H  48
+        # 4H  45
+        # ====================================================
 
         if (
-            rsi15 < 50
-            or rsi1h < 52
-            or rsi4h < 48
-            or rsi15 > 72
-            or rsi1h > 70
-            or rsi4h > 68
+            rsi15 < 47
+            or rsi1h < 48
+            or rsi4h < 45
+            or rsi15 > 74
+            or rsi1h > 72
+            or rsi4h > 70
         ):
 
             stat_add(
@@ -1922,9 +2075,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # PUMP ALREADY
-        # ----------------------------------------------------
+        # ====================================================
 
         if pump_already(
             candles15,
@@ -1940,9 +2093,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # SATIŞ BASKISI
-        # ----------------------------------------------------
+        # ====================================================
 
         if selling_pressure(
             candles15
@@ -1954,9 +2107,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # TREND
-        # ----------------------------------------------------
+        # ====================================================
 
         tr_score = trend_score(
             candles15,
@@ -1964,7 +2117,7 @@ def analyze_coin(
             candles4h
         )
 
-        if tr_score < 12:
+        if tr_score < 10:
 
             stat_add(
                 "trend"
@@ -1972,9 +2125,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
-        # RSI SCORE
-        # ----------------------------------------------------
+        # ====================================================
+        # RSI QUALITY
+        # ====================================================
 
         rs_score = rsi_quality_score(
             rsi15,
@@ -1982,7 +2135,7 @@ def analyze_coin(
             rsi4h
         )
 
-        if rs_score < 13:
+        if rs_score < 10:
 
             stat_add(
                 "rsi"
@@ -1990,16 +2143,16 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # VOLUME
-        # ----------------------------------------------------
+        # ====================================================
 
         vol_score = volume_score(
             candles15,
             candles1h
         )
 
-        if vol_score < 5:
+        if vol_score < 3:
 
             stat_add(
                 "volume"
@@ -2007,9 +2160,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # PRE-PUMP
-        # ----------------------------------------------------
+        # ====================================================
 
         pp_score = pre_pump_score(
             candles15,
@@ -2018,7 +2171,7 @@ def analyze_coin(
             rsi1h
         )
 
-        if pp_score < 8:
+        if pp_score < 6:
 
             stat_add(
                 "prempump"
@@ -2026,9 +2179,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # STRUCTURE
-        # ----------------------------------------------------
+        # ====================================================
 
         (
             st_score,
@@ -2056,8 +2209,8 @@ def analyze_coin(
             * 100
         )
 
-        # Direncin çok üzerinde
-        if distance > 2.5:
+        # Direnci fazla aşmışsa
+        if distance > 3.0:
 
             stat_add(
                 "structure"
@@ -2065,7 +2218,8 @@ def analyze_coin(
 
             return None
 
-        if st_score < 5:
+        # Çok zayıf yapı
+        if st_score < 3:
 
             stat_add(
                 "structure"
@@ -2073,9 +2227,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # MOMENTUM
-        # ----------------------------------------------------
+        # ====================================================
 
         (
             mom_score,
@@ -2088,7 +2242,7 @@ def analyze_coin(
             candles4h
         )
 
-        if mom_score < 6:
+        if mom_score < 4:
 
             stat_add(
                 "momentum"
@@ -2096,9 +2250,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # BTC
-        # ----------------------------------------------------
+        # ====================================================
 
         if btc_score < 2:
 
@@ -2108,9 +2262,9 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # TOPLAM SCORE
-        # ----------------------------------------------------
+        # ====================================================
 
         score = (
             tr_score
@@ -2122,16 +2276,16 @@ def analyze_coin(
             + btc_score
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # EARLY ENTRY BONUS
-        # ----------------------------------------------------
+        # ====================================================
 
         early_bonus = 0
 
         if (
-            52 <= rsi15 <= 65
-            and 53 <= rsi1h <= 65
-            and 48 <= rsi4h <= 62
+            50 <= rsi15 <= 65
+            and 51 <= rsi1h <= 65
+            and 45 <= rsi4h <= 62
             and 0 < m15 < 4
             and 0 < m1h < 6
         ):
@@ -2148,9 +2302,9 @@ def analyze_coin(
             )
         )
 
-        # ----------------------------------------------------
-        # SON FİLTRE
-        # ----------------------------------------------------
+        # ====================================================
+        # ANA SKOR
+        # ====================================================
 
         if score < MIN_SCORE:
 
@@ -2159,6 +2313,10 @@ def analyze_coin(
             )
 
             return None
+
+        # ====================================================
+        # MOMENTUM SON KONTROL
+        # ====================================================
 
         if m15 <= 0:
 
@@ -2176,6 +2334,7 @@ def analyze_coin(
 
             return None
 
+        # 4H çok kötü düşüyorsa alma
         if m4h < -1.0:
 
             stat_add(
@@ -2184,15 +2343,16 @@ def analyze_coin(
 
             return None
 
-        # ----------------------------------------------------
+        # ====================================================
         # VOLATİLİTE
-        # ----------------------------------------------------
+        # ====================================================
 
         ranges = []
 
         for c in candles15[-14:]:
 
             if c["close"] <= 0:
+
                 continue
 
             ranges.append(
@@ -2214,15 +2374,15 @@ def analyze_coin(
 
             avg_range = 0.015
 
-        # ----------------------------------------------------
+        # ====================================================
         # ENTRY
-        # ----------------------------------------------------
+        # ====================================================
 
         entry = price
 
-        # ----------------------------------------------------
+        # ====================================================
         # STOP
-        # ----------------------------------------------------
+        # ====================================================
 
         stop_pct = max(
             0.018,
@@ -2240,9 +2400,9 @@ def analyze_coin(
             )
         )
 
-        # ----------------------------------------------------
-        # TP
-        # ----------------------------------------------------
+        # ====================================================
+        # TAKE PROFIT
+        # ====================================================
 
         tp1 = (
             entry
@@ -2417,7 +2577,7 @@ def format_signal(
             "🔥 ÇOK YÜKSEK POTANSİYEL"
         )
 
-    elif score >= 84:
+    elif score >= 82:
 
         title = (
             "🚀 YÜKSEK POTANSİYEL"
@@ -2429,7 +2589,7 @@ def format_signal(
             "🟢 GÜÇLÜ LONG"
         )
 
-    return f"""🚀 PUMP RADAR 25.3
+    return f"""🚀 PUMP RADAR 25.4
 
 {title}
 
@@ -2469,6 +2629,10 @@ def main():
 
     global stats
 
+    # ========================================================
+    # RESET STATS
+    # ========================================================
+
     stats = {
 
         "total": 0,
@@ -2499,16 +2663,17 @@ def main():
     }
 
     print()
+
     print(
         "=" * 60
     )
 
     print(
-        "🚀 MEXC PUMP RADAR 25.3"
+        "🚀 MEXC PUMP RADAR 25.4"
     )
 
     print(
-        "🎯 AZ SİNYAL / YÜKSEK POTANSİYEL"
+        "🎯 ORTA SIKI / YÜKSEK POTANSİYEL"
     )
 
     print(
@@ -2541,7 +2706,7 @@ def main():
         return
 
     # ========================================================
-    # TICKER
+    # TICKERS
     # ========================================================
 
     tickers = get_all_tickers()
@@ -2577,6 +2742,7 @@ def main():
             ).upper()
 
             if symbol not in symbols:
+
                 continue
 
             price = float(
@@ -2604,9 +2770,9 @@ def main():
                 or 0
             )
 
-            # MEXC riseFallRate decimal ise %
             rise_pct = (
-                rise * 100
+                rise
+                * 100
             )
 
             ticker_map[symbol] = {
@@ -2635,13 +2801,16 @@ def main():
         )
 
         if not t:
+
             continue
 
         if t["price"] <= 0:
+
             continue
 
-        # Aşırı düşmüş coinleri alma
+        # Aşırı düşenleri ele
         if t["rise"] < -20:
+
             continue
 
         valid.append(
@@ -2654,7 +2823,7 @@ def main():
     )
 
     # ========================================================
-    # TOP VOLUME
+    # HACİM LİSTESİ
     # ========================================================
 
     top_volume = sorted(
@@ -2665,7 +2834,7 @@ def main():
     )[:220]
 
     # ========================================================
-    # TOP GAINERS
+    # GAINER LİSTESİ
     # ========================================================
 
     top_gainers = sorted(
@@ -2700,8 +2869,10 @@ def main():
     )
 
     candidates = [
+
         x
         for x in candidates
+
         if not is_cooldown(
             x,
             history
@@ -2719,7 +2890,7 @@ def main():
     )
 
     # ========================================================
-    # MAX CANDIDATES
+    # MAX 350
     # ========================================================
 
     candidates = candidates[
@@ -2740,7 +2911,7 @@ def main():
         return
 
     # ========================================================
-    # BTC SADECE 1 KEZ
+    # BTC
     # ========================================================
 
     print(
@@ -2805,6 +2976,7 @@ def main():
                 )
 
     print()
+
     print(
         f"Tarama tamamlandı: "
         f"{completed}"
@@ -2821,7 +2993,7 @@ def main():
     )
 
     # ========================================================
-    # STRONG
+    # GÜÇLÜ ADAYLAR
     # ========================================================
 
     strong = [
@@ -2833,7 +3005,7 @@ def main():
         >= MIN_SCORE
     ]
 
-    # En fazla 3
+    # Maksimum 3
     strong = strong[
         :MAX_TELEGRAM
     ]
@@ -2843,6 +3015,7 @@ def main():
     # ========================================================
 
     print()
+
     print(
         "=" * 60
     )
@@ -2911,7 +3084,7 @@ def main():
     )
 
     print(
-        f"Skor 75 altı: "
+        f"Skor 68 altı: "
         f"{stats['score']}"
     )
 
@@ -2925,7 +3098,7 @@ def main():
     )
 
     # ========================================================
-    # GÜÇLÜ ADAY YOK
+    # SİNYAL YOK
     # ========================================================
 
     if not strong:
@@ -2933,7 +3106,7 @@ def main():
         print()
 
         print(
-            "❌ Yeterince güçlü coin yok."
+            "❌ Bu taramada güçlü aday yok."
         )
 
         print(
@@ -2943,10 +3116,11 @@ def main():
         return
 
     # ========================================================
-    # EN GÜÇLÜLER
+    # GÜÇLÜ ADAYLAR
     # ========================================================
 
     print()
+
     print(
         "🔥 EN GÜÇLÜ ADAYLAR:"
     )
@@ -2954,8 +3128,8 @@ def main():
     for result in strong:
 
         print(
-            f"{result['symbol']} "
-            f"→ "
+            f"{result['symbol']}"
+            f" → "
             f"{result['score']}/100"
         )
 
@@ -3006,6 +3180,7 @@ def main():
     )
 
     print()
+
     print(
         "=" * 60
     )
