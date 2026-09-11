@@ -7,20 +7,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PUMP RADAR 25.2
+# 🚀 MEXC PUMP RADAR 25.3
 #
 # AMAÇ:
 # AZ AMA KALİTELİ SİNYAL
 #
-# TELEGRAM SADECE:
-# - COIN
-# - GÜÇ
-# - GİRİŞ
-# - STOP
-# - TP1
-# - TP2
-# - TP3
-# - RSI
+# TELEGRAM:
+# COIN
+# GÜÇ
+# GİRİŞ
+# STOP
+# TP1
+# TP2
+# TP3
+# RSI
 #
 # ============================================================
 
@@ -36,34 +36,41 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 HISTORY_FILE = "signal_history.json"
 
+# Paralel tarama
 MAX_WORKERS = 4
 
+# API
 REQUEST_TIMEOUT = 12
 RETRIES = 4
 RETRY_BASE = 1.5
 
-# Global API hız kontrolü
+# API istekleri arası minimum süre
 MIN_API_INTERVAL = 0.12
 
-# Daha geniş tarama
+# Aday havuzu
 MAX_CANDIDATES = 350
 
-# Telegram'da maksimum sinyal
+# Telegram maksimum sinyal
 MAX_TELEGRAM = 3
 
-# Güçlü aday eşiği
+# Güçlü sinyal eşiği
 MIN_SCORE = 75
 
-# Aynı coin tekrar gönderilmesin
+# Aynı coin tekrar sinyal vermesin
 COOLDOWN_HOURS = 12
 
 
 # ============================================================
-# GLOBAL DEĞİŞKENLER
+# GLOBAL API RATE LIMIT
 # ============================================================
 
 api_lock = threading.Lock()
 last_api_request = 0.0
+
+
+# ============================================================
+# İSTATİSTİK
+# ============================================================
 
 stats_lock = threading.Lock()
 
@@ -84,10 +91,6 @@ stats = {
 }
 
 
-# ============================================================
-# İSTATİSTİK
-# ============================================================
-
 def stat_add(key):
 
     with stats_lock:
@@ -97,7 +100,7 @@ def stat_add(key):
 
 
 # ============================================================
-# API RATE LIMIT
+# API WAIT
 # ============================================================
 
 def api_wait():
@@ -120,13 +123,20 @@ def api_wait():
 
 
 # ============================================================
-# HTTP
+# HTTP SESSION
 # ============================================================
 
 session = requests.Session()
 
 
-def request_json(url, params=None):
+# ============================================================
+# API REQUEST
+# ============================================================
+
+def request_json(
+    url,
+    params=None
+):
 
     for attempt in range(RETRIES):
 
@@ -146,41 +156,56 @@ def request_json(url, params=None):
 
             if response.status_code == 429:
 
-                time.sleep(
-                    RETRY_BASE * (attempt + 1)
+                wait = (
+                    RETRY_BASE
+                    * (attempt + 1)
+                    * 2
                 )
+
+                print(
+                    f"⚠️ 429 rate limit - "
+                    f"{wait:.1f}s bekleniyor"
+                )
+
+                time.sleep(wait)
 
                 continue
 
             # ------------------------------------------------
-            # SERVER HATASI
+            # SERVER ERROR
             # ------------------------------------------------
 
             if response.status_code >= 500:
 
                 time.sleep(
-                    RETRY_BASE * (attempt + 1)
+                    RETRY_BASE
+                    * (attempt + 1)
                 )
 
                 continue
 
             # ------------------------------------------------
-            # DİĞER HTTP HATALARI
+            # HTTP ERROR
             # ------------------------------------------------
 
             if response.status_code != 200:
 
-                time.sleep(RETRY_BASE)
+                time.sleep(
+                    RETRY_BASE
+                )
 
                 continue
 
             data = response.json()
 
             # ------------------------------------------------
-            # MEXC API HATASI
+            # MEXC API ERROR
             # ------------------------------------------------
 
-            if isinstance(data, dict):
+            if isinstance(
+                data,
+                dict
+            ):
 
                 success = data.get(
                     "success",
@@ -231,7 +256,9 @@ def request_json(url, params=None):
 
         except Exception:
 
-            time.sleep(RETRY_BASE)
+            time.sleep(
+                RETRY_BASE
+            )
 
     return None
 
@@ -257,7 +284,10 @@ def load_history():
 
             data = json.load(f)
 
-            if isinstance(data, dict):
+            if isinstance(
+                data,
+                dict
+            ):
                 return data
 
     except Exception:
@@ -266,7 +296,9 @@ def load_history():
     return {}
 
 
-def save_history(history):
+def save_history(
+    history
+):
 
     try:
 
@@ -296,7 +328,9 @@ def is_cooldown(
     history
 ):
 
-    last = history.get(symbol)
+    last = history.get(
+        symbol
+    )
 
     if not last:
         return False
@@ -329,7 +363,9 @@ def get_futures_symbols():
         "/api/v1/contract/detail"
     )
 
-    data = request_json(url)
+    data = request_json(
+        url
+    )
 
     if not data:
         return []
@@ -339,7 +375,11 @@ def get_futures_symbols():
         []
     )
 
-    if isinstance(raw, dict):
+    if isinstance(
+        raw,
+        dict
+    ):
+
         raw = list(
             raw.values()
         )
@@ -380,6 +420,10 @@ def get_futures_symbols():
             ):
                 continue
 
+            # ------------------------------------------------
+            # STOCK / ETF / INDEX ELE
+            # ------------------------------------------------
+
             bad_words = [
                 "ETF",
                 "STOCK",
@@ -397,7 +441,9 @@ def get_futures_symbols():
             ):
                 continue
 
-            symbols.append(symbol)
+            symbols.append(
+                symbol
+            )
 
         except Exception:
             continue
@@ -408,7 +454,7 @@ def get_futures_symbols():
 
 
 # ============================================================
-# TICKER
+# TICKERS
 # ============================================================
 
 def get_all_tickers():
@@ -418,7 +464,9 @@ def get_all_tickers():
         "/api/v1/contract/ticker"
     )
 
-    data = request_json(url)
+    data = request_json(
+        url
+    )
 
     if not data:
         return []
@@ -428,12 +476,17 @@ def get_all_tickers():
         []
     )
 
-    if isinstance(raw, dict):
+    if isinstance(
+        raw,
+        dict
+    ):
 
         if "symbol" in raw:
+
             raw = [raw]
 
         else:
+
             raw = list(
                 raw.values()
             )
@@ -449,6 +502,9 @@ def get_all_tickers():
 
 # ============================================================
 # KLINE
+#
+# ÖNEMLİ:
+# MEXC Futures Kline start/end = SANİYE
 # ============================================================
 
 def get_klines(
@@ -458,8 +514,11 @@ def get_klines(
 ):
 
     interval_minutes = {
+
         "Min15": 15,
+
         "Min60": 60,
+
         "Hour4": 240
     }
 
@@ -470,16 +529,19 @@ def get_klines(
     if not minutes:
         return None
 
-    now_ms = int(
-        time.time() * 1000
+    # ========================================================
+    # SANİYE KULLANIYORUZ
+    # ========================================================
+
+    now_sec = int(
+        time.time()
     )
 
-    start_ms = (
-        now_ms
+    start_sec = (
+        now_sec
         - (
             minutes
             * 60
-            * 1000
             * (limit + 10)
         )
     )
@@ -490,9 +552,12 @@ def get_klines(
     )
 
     params = {
+
         "interval": interval,
-        "start": start_ms,
-        "end": now_ms
+
+        "start": start_sec,
+
+        "end": now_sec
     }
 
     data = request_json(
@@ -511,7 +576,7 @@ def get_klines(
         return None
 
     # ========================================================
-    # DICT
+    # DICT FORMAT
     # ========================================================
 
     if isinstance(
@@ -560,30 +625,48 @@ def get_klines(
                 len(vols)
             )
 
+            if n < 20:
+                return None
+
             candles = []
 
             for i in range(n):
 
-                candles.append({
-                    "time": float(
-                        times[i]
-                    ),
-                    "open": float(
-                        opens[i]
-                    ),
-                    "close": float(
-                        closes[i]
-                    ),
-                    "high": float(
-                        highs[i]
-                    ),
-                    "low": float(
-                        lows[i]
-                    ),
-                    "vol": float(
-                        vols[i]
-                    )
-                })
+                try:
+
+                    candles.append({
+
+                        "time": float(
+                            times[i]
+                        ),
+
+                        "open": float(
+                            opens[i]
+                        ),
+
+                        "close": float(
+                            closes[i]
+                        ),
+
+                        "high": float(
+                            highs[i]
+                        ),
+
+                        "low": float(
+                            lows[i]
+                        ),
+
+                        "vol": float(
+                            vols[i]
+                        )
+                    })
+
+                except Exception:
+
+                    continue
+
+            if len(candles) < 20:
+                return None
 
             return candles[-limit:]
 
@@ -592,7 +675,7 @@ def get_klines(
             return None
 
     # ========================================================
-    # LIST
+    # LIST FORMAT
     # ========================================================
 
     if isinstance(
@@ -612,36 +695,42 @@ def get_klines(
                 ):
 
                     candles.append({
+
                         "time": float(
                             x.get(
                                 "time",
                                 0
                             )
                         ),
+
                         "open": float(
                             x.get(
                                 "open",
                                 0
                             )
                         ),
+
                         "close": float(
                             x.get(
                                 "close",
                                 0
                             )
                         ),
+
                         "high": float(
                             x.get(
                                 "high",
                                 0
                             )
                         ),
+
                         "low": float(
                             x.get(
                                 "low",
                                 0
                             )
                         ),
+
                         "vol": float(
                             x.get(
                                 "vol",
@@ -662,28 +751,38 @@ def get_klines(
                 ):
 
                     candles.append({
+
                         "time": float(
                             x[0]
                         ),
+
                         "open": float(
                             x[1]
                         ),
+
                         "close": float(
                             x[2]
                         ),
+
                         "high": float(
                             x[3]
                         ),
+
                         "low": float(
                             x[4]
                         ),
+
                         "vol": float(
                             x[5]
                         )
                     })
 
             except Exception:
+
                 continue
+
+        if len(candles) < 20:
+            return None
 
         return candles[-limit:]
 
@@ -721,23 +820,31 @@ def calculate_rsi(
 
         if change >= 0:
 
-            gains.append(change)
+            gains.append(
+                change
+            )
+
             losses.append(0)
 
         else:
 
             gains.append(0)
+
             losses.append(
                 abs(change)
             )
 
     avg_gain = (
-        sum(gains[:period])
+        sum(
+            gains[:period]
+        )
         / period
     )
 
     avg_loss = (
-        sum(losses[:period])
+        sum(
+            losses[:period]
+        )
         / period
     )
 
@@ -792,11 +899,14 @@ def ema(
         return None
 
     multiplier = (
-        2 / (period + 1)
+        2
+        / (period + 1)
     )
 
     result = (
-        sum(values[:period])
+        sum(
+            values[:period]
+        )
         / period
     )
 
@@ -840,7 +950,9 @@ def pct_change(
         return 0.0
 
     return (
-        (new - old)
+        (
+            new - old
+        )
         / old
         * 100
     )
@@ -878,7 +990,10 @@ def volume_ratio(
     if avg <= 0:
         return 0.0
 
-    return current / avg
+    return (
+        current
+        / avg
+    )
 
 
 # ============================================================
@@ -942,17 +1057,23 @@ def selling_pressure(
 
     high = c["high"]
     low = c["low"]
+
     op = c["open"]
     close = c["close"]
 
-    rng = high - low
+    rng = (
+        high - low
+    )
 
     if rng <= 0:
         return 0.0
 
     upper_wick = (
         high
-        - max(op, close)
+        - max(
+            op,
+            close
+        )
     )
 
     body = abs(
@@ -960,7 +1081,10 @@ def selling_pressure(
     )
 
     # Büyük üst fitil
-    if upper_wick > body * 2.5:
+    if upper_wick > (
+        body * 2.5
+    ):
+
         return 1.0
 
     # Büyük kırmızı mum
@@ -970,7 +1094,10 @@ def selling_pressure(
             op - close
         )
 
-        if red_body > rng * 0.60:
+        if red_body > (
+            rng * 0.60
+        ):
+
             return 1.0
 
     return 0.0
@@ -1020,7 +1147,7 @@ def pump_already(
     )
 
     # --------------------------------------------------------
-    # PUMP ÇOK İLERLEDİYSE
+    # PUMP ÇOK İLERLEMİŞ
     # --------------------------------------------------------
 
     if move15_6 >= 7.5:
@@ -1033,7 +1160,7 @@ def pump_already(
         return True
 
     # --------------------------------------------------------
-    # RSI ŞİŞMİŞSE
+    # RSI AŞIRI SICAK
     # --------------------------------------------------------
 
     if (
@@ -1069,6 +1196,7 @@ def structure_score(
         not candles
         or len(candles) < 30
     ):
+
         return (
             0,
             False,
@@ -1098,6 +1226,7 @@ def structure_score(
     )
 
     if resistance <= 0:
+
         return (
             0,
             False,
@@ -1106,7 +1235,10 @@ def structure_score(
         )
 
     distance = (
-        (price - resistance)
+        (
+            price
+            - resistance
+        )
         / resistance
         * 100
     )
@@ -1127,6 +1259,7 @@ def structure_score(
         <= resistance * 1.012
         and price > resistance
     ):
+
         retest = True
 
     if retest:
@@ -1137,11 +1270,17 @@ def structure_score(
 
         score = 13
 
-    elif price >= resistance * 0.97:
+    elif (
+        price
+        >= resistance * 0.97
+    ):
 
         score = 10
 
-    elif price >= resistance * 0.94:
+    elif (
+        price
+        >= resistance * 0.94
+    ):
 
         score = 7
 
@@ -1158,7 +1297,7 @@ def structure_score(
 
 
 # ============================================================
-# TREND
+# TIMEFRAME TREND
 # ============================================================
 
 def timeframe_trend(
@@ -1209,6 +1348,7 @@ def timeframe_trend(
         closes,
         5
     ) > 0:
+
         score += 1
 
     return min(
@@ -1252,7 +1392,7 @@ def trend_score(
 
 
 # ============================================================
-# RSI QUALITY
+# RSI SCORE
 # ============================================================
 
 def rsi_quality_score(
@@ -1263,40 +1403,82 @@ def rsi_quality_score(
 
     score = 0
 
+    # --------------------------------------------------------
     # 15M
-    if 54 <= rsi15 <= 65:
+    # --------------------------------------------------------
+
+    if (
+        54 <= rsi15 <= 65
+    ):
+
         score += 7
 
-    elif 50 <= rsi15 < 54:
+    elif (
+        50 <= rsi15 < 54
+    ):
+
         score += 5
 
-    elif 65 < rsi15 <= 70:
+    elif (
+        65 < rsi15 <= 70
+    ):
+
         score += 5
 
-    elif 48 <= rsi15 < 50:
+    elif (
+        48 <= rsi15 < 50
+    ):
+
         score += 3
 
+    # --------------------------------------------------------
     # 1H
-    if 55 <= rsi1h <= 65:
+    # --------------------------------------------------------
+
+    if (
+        55 <= rsi1h <= 65
+    ):
+
         score += 7
 
-    elif 52 <= rsi1h < 55:
+    elif (
+        52 <= rsi1h < 55
+    ):
+
         score += 5
 
-    elif 65 < rsi1h <= 68:
+    elif (
+        65 < rsi1h <= 68
+    ):
+
         score += 5
 
-    elif 50 <= rsi1h < 52:
+    elif (
+        50 <= rsi1h < 52
+    ):
+
         score += 3
 
+    # --------------------------------------------------------
     # 4H
-    if 50 <= rsi4h <= 62:
+    # --------------------------------------------------------
+
+    if (
+        50 <= rsi4h <= 62
+    ):
+
         score += 6
 
-    elif 48 <= rsi4h < 50:
+    elif (
+        48 <= rsi4h < 50
+    ):
+
         score += 4
 
-    elif 62 < rsi4h <= 67:
+    elif (
+        62 < rsi4h <= 67
+    ):
+
         score += 4
 
     return min(
@@ -1330,29 +1512,37 @@ def volume_score(
 
     # 15M
     if vr15 >= 2.5:
+
         score += 8
 
     elif vr15 >= 1.8:
+
         score += 6
 
     elif vr15 >= 1.5:
+
         score += 5
 
     elif vr15 >= 1.25:
+
         score += 3
 
     # 1H
     if vr1h >= 2.0:
+
         score += 5
 
     elif vr1h >= 1.5:
+
         score += 4
 
     elif vr1h >= 1.25:
+
         score += 2
 
     # Hacim gelişimi
     if growth15 >= 1.20:
+
         score += 2
 
     return min(
@@ -1404,25 +1594,37 @@ def momentum_score(
     score = 0
 
     # 15M
-    if 0.4 <= m15 <= 4:
+    if (
+        0.4 <= m15 <= 4
+    ):
+
         score += 4
 
     elif m15 > 0:
+
         score += 2
 
     # 1H
-    if 0.5 <= m1h <= 6:
+    if (
+        0.5 <= m1h <= 6
+    ):
+
         score += 4
 
     elif m1h > 0:
+
         score += 2
 
     # 4H
     if m4h > 0:
+
         score += 2
 
     return (
-        min(score, 10),
+        min(
+            score,
+            10
+        ),
         m15,
         m1h,
         m4h
@@ -1462,29 +1664,41 @@ def pre_pump_score(
 
     score = 0
 
-    # 15M
-    if 0.5 <= m15 <= 5:
+    # 15M sağlıklı hareket
+    if (
+        0.5 <= m15 <= 5
+    ):
+
         score += 6
 
-    elif 0 < m15 <= 7:
+    elif (
+        0 < m15 <= 7
+    ):
+
         score += 4
 
-    # 1H
-    if 0.5 <= m1h <= 7:
+    # 1H sağlıklı hareket
+    if (
+        0.5 <= m1h <= 7
+    ):
+
         score += 5
 
     elif m1h > 0:
+
         score += 3
 
-    # RSI uygun bölge
+    # RSI erken bölge
     if (
         52 <= rsi15 <= 68
     ):
+
         score += 2
 
     if (
         53 <= rsi1h <= 68
     ):
+
         score += 2
 
     return min(
@@ -1494,11 +1708,7 @@ def pre_pump_score(
 
 
 # ============================================================
-# BTC DURUMU
-#
-# ÖNEMLİ:
-# ARTIK HER COIN İÇİN ÇAĞRILMIYOR.
-# SADECE BİR KEZ ÇALIŞIYOR.
+# BTC
 # ============================================================
 
 def get_btc_state():
@@ -1521,6 +1731,7 @@ def get_btc_state():
             not c15
             or not c1h
         ):
+
             return 3
 
         close15 = [
@@ -1543,11 +1754,12 @@ def get_btc_state():
             3
         )
 
-        # Çok kötü BTC
+        # Çok kötü
         if (
             m15 < -1.2
             and m1h < -2.0
         ):
+
             return 0
 
         # Negatif
@@ -1555,13 +1767,15 @@ def get_btc_state():
             m15 < -0.5
             or m1h < -1.0
         ):
+
             return 2
 
-        # İyi BTC
+        # Pozitif
         if (
             m15 >= 0
             and m1h >= 0
         ):
+
             return 5
 
         return 3
@@ -1580,7 +1794,9 @@ def analyze_coin(
     btc_score
 ):
 
-    stat_add("total")
+    stat_add(
+        "total"
+    )
 
     try:
 
@@ -1631,7 +1847,7 @@ def analyze_coin(
             return None
 
         # ----------------------------------------------------
-        # CLOSES
+        # CLOSE
         # ----------------------------------------------------
 
         close15 = [
@@ -1775,7 +1991,7 @@ def analyze_coin(
             return None
 
         # ----------------------------------------------------
-        # HACİM
+        # VOLUME
         # ----------------------------------------------------
 
         vol_score = volume_score(
@@ -1832,12 +2048,15 @@ def analyze_coin(
             return None
 
         distance = (
-            (price - resistance)
+            (
+                price
+                - resistance
+            )
             / resistance
             * 100
         )
 
-        # Direnci fazla aşmışsa kovalamaca
+        # Direncin çok üzerinde
         if distance > 2.5:
 
             stat_add(
@@ -1846,7 +2065,6 @@ def analyze_coin(
 
             return None
 
-        # Çok kötü yapı
         if st_score < 5:
 
             stat_add(
@@ -1905,7 +2123,7 @@ def analyze_coin(
         )
 
         # ----------------------------------------------------
-        # ERKEN GİRİŞ BONUSU
+        # EARLY ENTRY BONUS
         # ----------------------------------------------------
 
         early_bonus = 0
@@ -1924,7 +2142,10 @@ def analyze_coin(
 
         score = min(
             100,
-            max(0, score)
+            max(
+                0,
+                score
+            )
         )
 
         # ----------------------------------------------------
@@ -1994,6 +2215,12 @@ def analyze_coin(
             avg_range = 0.015
 
         # ----------------------------------------------------
+        # ENTRY
+        # ----------------------------------------------------
+
+        entry = price
+
+        # ----------------------------------------------------
         # STOP
         # ----------------------------------------------------
 
@@ -2005,20 +2232,32 @@ def analyze_coin(
             )
         )
 
-        entry = price
-
         stop = (
             entry
-            * (1 - stop_pct)
+            * (
+                1
+                - stop_pct
+            )
         )
 
         # ----------------------------------------------------
         # TP
         # ----------------------------------------------------
 
-        tp1 = entry * 1.040
-        tp2 = entry * 1.065
-        tp3 = entry * 1.095
+        tp1 = (
+            entry
+            * 1.040
+        )
+
+        tp2 = (
+            entry
+            * 1.065
+        )
+
+        tp3 = (
+            entry
+            * 1.095
+        )
 
         stat_add(
             "strong"
@@ -2031,14 +2270,19 @@ def analyze_coin(
             "score": score,
 
             "entry": entry,
+
             "stop": stop,
 
             "tp1": tp1,
+
             "tp2": tp2,
+
             "tp3": tp3,
 
             "rsi15": rsi15,
+
             "rsi1h": rsi1h,
+
             "rsi4h": rsi4h,
 
             "volume15": volume_ratio(
@@ -2050,10 +2294,13 @@ def analyze_coin(
             ),
 
             "momentum15": m15,
+
             "momentum1h": m1h,
+
             "momentum4h": m4h,
 
             "breakout": breakout,
+
             "retest": retest,
 
             "btc_score": btc_score
@@ -2084,7 +2331,7 @@ def send_telegram(
     if not TELEGRAM_BOT_TOKEN:
 
         print(
-            "TELEGRAM_BOT_TOKEN yok"
+            "❌ TELEGRAM_BOT_TOKEN yok"
         )
 
         return False
@@ -2092,7 +2339,7 @@ def send_telegram(
     if not TELEGRAM_CHAT_ID:
 
         print(
-            "TELEGRAM_CHAT_ID yok"
+            "❌ TELEGRAM_CHAT_ID yok"
         )
 
         return False
@@ -2104,9 +2351,15 @@ def send_telegram(
     )
 
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True
+
+        "chat_id":
+            TELEGRAM_CHAT_ID,
+
+        "text":
+            text,
+
+        "disable_web_page_preview":
+            True
     }
 
     try:
@@ -2141,7 +2394,7 @@ def send_telegram(
 
 
 # ============================================================
-# TELEGRAM MESAJI
+# TELEGRAM FORMAT
 # ============================================================
 
 def format_signal(
@@ -2176,7 +2429,7 @@ def format_signal(
             "🟢 GÜÇLÜ LONG"
         )
 
-    return f"""🚀 PUMP RADAR 25.2
+    return f"""🚀 PUMP RADAR 25.3
 
 {title}
 
@@ -2217,30 +2470,54 @@ def main():
     global stats
 
     stats = {
+
         "total": 0,
+
         "data_error": 0,
+
         "rsi": 0,
+
         "pump": 0,
+
         "selling": 0,
+
         "trend": 0,
+
         "volume": 0,
+
         "prempump": 0,
+
         "structure": 0,
+
         "momentum": 0,
+
         "btc": 0,
+
         "score": 0,
+
         "strong": 0
     }
 
     print()
-    print("=" * 60)
     print(
-        "🚀 MEXC PUMP RADAR 25.2"
+        "=" * 60
     )
+
+    print(
+        "🚀 MEXC PUMP RADAR 25.3"
+    )
+
     print(
         "🎯 AZ SİNYAL / YÜKSEK POTANSİYEL"
     )
-    print("=" * 60)
+
+    print(
+        "=" * 60
+    )
+
+    # ========================================================
+    # HISTORY
+    # ========================================================
 
     history = load_history()
 
@@ -2264,7 +2541,7 @@ def main():
         return
 
     # ========================================================
-    # TICKERS
+    # TICKER
     # ========================================================
 
     tickers = get_all_tickers()
@@ -2282,11 +2559,11 @@ def main():
 
         return
 
-    ticker_map = {}
-
     # ========================================================
     # TICKER MAP
     # ========================================================
+
+    ticker_map = {}
 
     for t in tickers:
 
@@ -2327,16 +2604,22 @@ def main():
                 or 0
             )
 
-            # Decimal oran
-            rise_pct = rise * 100
+            # MEXC riseFallRate decimal ise %
+            rise_pct = (
+                rise * 100
+            )
 
             ticker_map[symbol] = {
+
                 "price": price,
+
                 "rise": rise_pct,
+
                 "amount": amount
             }
 
         except Exception:
+
             continue
 
     # ========================================================
@@ -2357,11 +2640,13 @@ def main():
         if t["price"] <= 0:
             continue
 
-        # Aşırı düşenleri ele
+        # Aşırı düşmüş coinleri alma
         if t["rise"] < -20:
             continue
 
-        valid.append(symbol)
+        valid.append(
+            symbol
+        )
 
     print(
         f"Geçerli coin: "
@@ -2369,10 +2654,9 @@ def main():
     )
 
     # ========================================================
-    # DAHA GENİŞ ADAY HAVUZU
+    # TOP VOLUME
     # ========================================================
 
-    # En yüksek hacimli 220
     top_volume = sorted(
         valid,
         key=lambda x:
@@ -2380,13 +2664,20 @@ def main():
         reverse=True
     )[:220]
 
-    # En çok yükselen 180
+    # ========================================================
+    # TOP GAINERS
+    # ========================================================
+
     top_gainers = sorted(
         valid,
         key=lambda x:
         ticker_map[x]["rise"],
         reverse=True
     )[:180]
+
+    # ========================================================
+    # BİRLEŞTİR
+    # ========================================================
 
     candidate_set = set(
         top_volume
@@ -2428,7 +2719,7 @@ def main():
     )
 
     # ========================================================
-    # MAX 350
+    # MAX CANDIDATES
     # ========================================================
 
     candidates = candidates[
@@ -2449,7 +2740,7 @@ def main():
         return
 
     # ========================================================
-    # BTC
+    # BTC SADECE 1 KEZ
     # ========================================================
 
     print(
@@ -2484,7 +2775,6 @@ def main():
             ): symbol
 
             for symbol in candidates
-
         }
 
         for future in as_completed(
@@ -2535,25 +2825,35 @@ def main():
     # ========================================================
 
     strong = [
+
         x
         for x in results
-        if x["score"] >= MIN_SCORE
+
+        if x["score"]
+        >= MIN_SCORE
     ]
 
+    # En fazla 3
     strong = strong[
         :MAX_TELEGRAM
     ]
 
     # ========================================================
-    # RAPOR
+    # ELEME RAPORU
     # ========================================================
 
     print()
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
+
     print(
         "📊 ELEME RAPORU"
     )
-    print("=" * 60)
+
+    print(
+        "=" * 60
+    )
 
     print(
         f"Toplam analiz: "
@@ -2620,7 +2920,9 @@ def main():
         f"{len(strong)}"
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
     # ========================================================
     # GÜÇLÜ ADAY YOK
@@ -2629,6 +2931,7 @@ def main():
     if not strong:
 
         print()
+
         print(
             "❌ Yeterince güçlü coin yok."
         )
@@ -2640,7 +2943,7 @@ def main():
         return
 
     # ========================================================
-    # EN GÜÇLÜ ADAYLARI GÖSTER
+    # EN GÜÇLÜLER
     # ========================================================
 
     print()
@@ -2703,12 +3006,19 @@ def main():
     )
 
     print()
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
+
     print(
         f"📨 Telegram gönderilen: "
         f"{sent_count}"
     )
-    print("=" * 60)
+
+    print(
+        "=" * 60
+    )
+
     print()
 
 
@@ -2717,4 +3027,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
