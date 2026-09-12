@@ -6,17 +6,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PUMP RADAR V4.2
-#
-# AMAÇ:
-# LSK gibi büyük pump'lardan ÖNCE oluşan yapıları bulmak.
+# 🚀 MEXC LSK PRE-PUMP RADAR V4.3
 #
 # 4H  = ANA YAPI
 # 1H  = GÜÇ TEYİDİ
-# 15M = TETİK / GİRİŞ HAZIRLIĞI
+# 15M = TETİK
+#
+# AMAÇ:
+# LSK gibi büyük hareketlerden ÖNCE oluşan yapıları bulmak.
 #
 # SADECE MEXC USDT FUTURES
-# SADECE SİNYAL
+# SADECE TELEGRAM SİNYALİ
 # OTOMATİK İŞLEM AÇMAZ
 # ============================================================
 
@@ -35,13 +35,14 @@ MAX_WORKERS = 5
 
 MAX_ALERTS = 6
 
-MIN_SCORE = 70
+# Biraz gevşek tutuyoruz ki iyi adayları kaçırmayalım.
+MIN_SCORE = 68
 
 CANDLE_COUNT = 80
 
 REQUEST_TIMEOUT = 12
 
-# MEXC API'yi gereksiz zorlamamak için
+# MEXC API'yi zorlamamak için
 REQUEST_INTERVAL = 0.11
 
 
@@ -69,6 +70,7 @@ session.headers.update({
 # ============================================================
 
 rate_lock = threading.Lock()
+
 last_request = 0.0
 
 
@@ -134,7 +136,7 @@ def mexc_get(path, params=None, retries=3):
             if response.status_code == 429:
 
                 print(
-                    "⚠️ Rate limit - bekleniyor..."
+                    "⚠️ MEXC rate limit - bekleniyor..."
                 )
 
                 time.sleep(
@@ -144,7 +146,7 @@ def mexc_get(path, params=None, retries=3):
                 continue
 
             # ------------------------------------------------
-            # HTTP HATA
+            # HTTP HATASI
             # ------------------------------------------------
 
             if response.status_code != 200:
@@ -171,7 +173,7 @@ def mexc_get(path, params=None, retries=3):
                 continue
 
             # ------------------------------------------------
-            # MEXC SUCCESS
+            # MEXC API HATASI
             # ------------------------------------------------
 
             if data.get("success") is False:
@@ -179,9 +181,11 @@ def mexc_get(path, params=None, retries=3):
                 if attempt == retries - 1:
 
                     print(
-                        f"❌ MEXC API: "
-                        f"{data}"
+                        "❌ MEXC API:",
+                        data
                     )
+
+                time.sleep(0.5)
 
                 continue
 
@@ -196,7 +200,8 @@ def mexc_get(path, params=None, retries=3):
             if attempt == retries - 1:
 
                 print(
-                    f"❌ Request hatası: {e}"
+                    "❌ Request hatası:",
+                    repr(e)
                 )
 
             time.sleep(0.5)
@@ -209,7 +214,7 @@ def mexc_get(path, params=None, retries=3):
 
 
 # ============================================================
-# FUTURES SEMBOLLERİ
+# FUTURES SEMBOLLER
 # ============================================================
 
 def get_symbols():
@@ -243,10 +248,11 @@ def get_symbols():
             ""
         )
 
+        # Sadece USDT Futures
         if not symbol.endswith("_USDT"):
             continue
 
-        # Sadece aktif kontratlar
+        # Aktif kontrat kontrolü
         state = item.get("state")
 
         if state is not None:
@@ -276,6 +282,10 @@ def get_symbols():
 
 # ============================================================
 # KLINE
+#
+# ÖNEMLİ:
+# limit kullanılmıyor.
+# start / end kullanılıyor.
 # ============================================================
 
 def get_klines(
@@ -308,6 +318,7 @@ def get_klines(
     )
 
     if not data:
+
         return None
 
     raw = data.get(
@@ -315,6 +326,7 @@ def get_klines(
     )
 
     if not isinstance(raw, dict):
+
         return None
 
     try:
@@ -358,6 +370,7 @@ def get_klines(
             len(volumes)
         )
 
+        # Normal taramada en az 35 mum gerekli.
         if length < 35:
 
             return None
@@ -423,6 +436,7 @@ def calculate_rsi(
         return 50.0
 
     gains = []
+
     losses = []
 
     for i in range(
@@ -438,11 +452,13 @@ def calculate_rsi(
         if diff > 0:
 
             gains.append(diff)
+
             losses.append(0)
 
         else:
 
             gains.append(0)
+
             losses.append(
                 abs(diff)
             )
@@ -484,6 +500,10 @@ def sma(
     period
 ):
 
+    if not values:
+
+        return 0
+
     if len(values) < period:
 
         return (
@@ -498,7 +518,7 @@ def sma(
 
 
 # ============================================================
-# DEĞİŞİM
+# YÜZDE DEĞİŞİM
 # ============================================================
 
 def change_pct(
@@ -542,18 +562,22 @@ def volume_ratio(
 
         return 1.0
 
-    recent_avg = (
-        sum(volumes[-recent:])
-        / recent
-    )
+    recent_values = volumes[
+        -recent:
+    ]
 
     base_values = volumes[
-        -(base + recent):-recent
+        -(recent + base):-recent
     ]
 
     if not base_values:
 
         return 1.0
+
+    recent_avg = (
+        sum(recent_values)
+        / len(recent_values)
+    )
 
     base_avg = (
         sum(base_values)
@@ -582,9 +606,13 @@ def compression(
 
         return 0, 0
 
-    recent = candles[-20:]
+    recent = candles[
+        -20:
+    ]
 
-    previous = candles[-40:-20]
+    previous = candles[
+        -40:-20
+    ]
 
     recent_high = max(
         x["high"]
@@ -675,7 +703,10 @@ def compression(
 
         score = 0
 
-    return score, recent_width
+    return (
+        score,
+        recent_width
+    )
 
 
 # ============================================================
@@ -845,7 +876,7 @@ def resistance(
 
 
 # ============================================================
-# 4H ANALİZ
+# 4H ANA ANALİZ
 # ============================================================
 
 def analyze_4h(
@@ -877,11 +908,13 @@ def analyze_4h(
         closes
     )
 
+    # Son 6 adet 4H mum ≈ 24 saat
     change24 = change_pct(
         closes,
         6
     )
 
+    # Son 1 adet 4H mum
     change4 = change_pct(
         closes,
         1
@@ -891,7 +924,7 @@ def analyze_4h(
     # ZATEN PUMP YAPMIŞ COINLERİ ELE
     # --------------------------------------------------------
 
-    if change24 >= 28:
+    if change24 >= 30:
 
         return None
 
@@ -911,6 +944,8 @@ def analyze_4h(
         candles
     )
 
+    # Biraz gevşek:
+    # iyi sıkışmaları kaçırmamaya çalışıyoruz.
     if comp_score < 7:
 
         return None
@@ -948,13 +983,13 @@ def analyze_4h(
         return None
 
     # --------------------------------------------------------
-    # HACİM
+    # 4H HACİM
     # --------------------------------------------------------
 
     vol4 = volume_ratio(
         volumes,
-        5,
-        30
+        recent=5,
+        base=30
     )
 
     vol_score = 0
@@ -963,7 +998,7 @@ def analyze_4h(
 
         vol_score = 15
 
-    elif vol4 >= 2:
+    elif vol4 >= 2.0:
 
         vol_score = 12
 
@@ -987,7 +1022,9 @@ def analyze_4h(
         + vol_score
     )
 
-    # RSI sadece küçük bonus
+    # RSI küçük bonus.
+    # Artık RSI tek başına yüksek puan veremez.
+
     if 50 <= rsi4 <= 68:
 
         score += 7
@@ -995,6 +1032,10 @@ def analyze_4h(
     elif 45 <= rsi4 <= 72:
 
         score += 4
+
+    # --------------------------------------------------------
+    # 4H GEÇİŞ
+    # --------------------------------------------------------
 
     if score < 35:
 
@@ -1036,7 +1077,7 @@ def analyze_4h(
 
 
 # ============================================================
-# 1H ANALİZ
+# 1H GÜÇ ANALİZİ
 # ============================================================
 
 def analyze_1h(
@@ -1077,6 +1118,7 @@ def analyze_1h(
         1
     )
 
+    # Son 4 saat
     change4bars = change_pct(
         closes,
         4
@@ -1084,8 +1126,8 @@ def analyze_1h(
 
     vol1 = volume_ratio(
         volumes,
-        4,
-        30
+        recent=4,
+        base=30
     )
 
     hl1 = higher_low(
@@ -1116,7 +1158,7 @@ def analyze_1h(
     # HACİM
     # --------------------------------------------------------
 
-    if vol1 >= 3:
+    if vol1 >= 3.0:
 
         score += 16
 
@@ -1133,7 +1175,7 @@ def analyze_1h(
         score += 6
 
     # --------------------------------------------------------
-    # MOMENTUM
+    # 1H MOMENTUM
     # --------------------------------------------------------
 
     if 0.2 <= change1 <= 6:
@@ -1184,6 +1226,10 @@ def analyze_1h(
 
         return None
 
+    # --------------------------------------------------------
+    # 1H GEÇİŞ
+    # --------------------------------------------------------
+
     if score < 50:
 
         return None
@@ -1214,7 +1260,7 @@ def analyze_1h(
 
 
 # ============================================================
-# 15M ANALİZ
+# 15M TETİK
 # ============================================================
 
 def analyze_15m(
@@ -1260,6 +1306,7 @@ def analyze_15m(
         1
     )
 
+    # Son 1 saat
     change1h = change_pct(
         closes,
         4
@@ -1267,8 +1314,8 @@ def analyze_15m(
 
     vol15 = volume_ratio(
         volumes,
-        3,
-        30
+        recent=3,
+        base=30
     )
 
     score = candidate[
@@ -1295,11 +1342,11 @@ def analyze_15m(
     # 15M HACİM
     # --------------------------------------------------------
 
-    if vol15 >= 4:
+    if vol15 >= 4.0:
 
         score += 20
 
-    elif vol15 >= 3:
+    elif vol15 >= 3.0:
 
         score += 17
 
@@ -1332,7 +1379,7 @@ def analyze_15m(
         score -= 10
 
     # --------------------------------------------------------
-    # SON 1 SAATTE PUMP
+    # SON 1 SAAT AŞIRI HAREKET
     # --------------------------------------------------------
 
     if change1h >= 10:
@@ -1353,13 +1400,19 @@ def analyze_15m(
             previous_highs
         )
 
-        distance15 = (
-            (
-                resistance15
-                - price
-            )
-            / price
-        ) * 100
+        if price > 0:
+
+            distance15 = (
+                (
+                    resistance15
+                    - price
+                )
+                / price
+            ) * 100
+
+        else:
+
+            distance15 = 99
 
     else:
 
@@ -1438,13 +1491,16 @@ def parallel_scan(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = [
-            executor.submit(
-                function,
-                item
+        futures = []
+
+        for item in items:
+
+            futures.append(
+                executor.submit(
+                    function,
+                    item
+                )
             )
-            for item in items
-        ]
 
         for future in as_completed(
             futures
@@ -1541,14 +1597,14 @@ def send_telegram(
 
         print(
             "❌ Telegram hatası:",
-            e
+            repr(e)
         )
 
     return False
 
 
 # ============================================================
-# TELEGRAM MESAJ
+# TELEGRAM MESAJI
 # ============================================================
 
 def make_message(
@@ -1564,6 +1620,12 @@ def make_message(
     reasons = []
 
     if c["comp_score"] >= 14:
+
+        reasons.append(
+            "4H güçlü sıkışma"
+        )
+
+    elif c["comp_score"] >= 7:
 
         reasons.append(
             "4H sıkışma"
@@ -1665,7 +1727,7 @@ Alan:
 
 ━━━━━━━━━━━━━━
 
-🎯 REFERANS
+🎯 REFERANS SEVİYELER
 
 Giriş:
 {price:.10g}
@@ -1690,7 +1752,7 @@ Otomatik işlem açmaz.
 
 
 # ============================================================
-# MAIN
+# ANA PROGRAM
 # ============================================================
 
 def main():
@@ -1698,9 +1760,13 @@ def main():
     start_time = time.time()
 
     print()
-    print("=" * 60)
-    print("🚀 MEXC LSK PRE-PUMP RADAR V4.2")
-    print("=" * 60)
+    print("=" * 65)
+    print("🚀 MEXC LSK PRE-PUMP RADAR V4.3")
+    print("=" * 65)
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
 
     if TOKEN:
 
@@ -1727,7 +1793,7 @@ def main():
         )
 
     # ========================================================
-    # SEMBOLLER
+    # FUTURES
     # ========================================================
 
     symbols = get_symbols()
@@ -1741,7 +1807,11 @@ def main():
         return
 
     # ========================================================
-    # API TEST
+    # KLINE API TEST
+    #
+    # BURASI ÖNEMLİ:
+    # 50 MUM İSTİYORUZ.
+    # get_klines() minimum 35 istediği için artık hata olmaz.
     # ========================================================
 
     print()
@@ -1750,209 +1820,7 @@ def main():
     test = get_klines(
         "BTC_USDT",
         "Min15",
-        20
+        50
     )
 
-    if not test:
-
-        print(
-            "❌ Kline API başarısız"
-        )
-
-        return
-
-    print(
-        f"✅ Kline çalışıyor: "
-        f"{len(test)} mum"
-    )
-
-    # ========================================================
-    # 4H
-    # ========================================================
-
-    print()
-    print(
-        f"🔎 4H ANA YAPI: "
-        f"{len(symbols)} coin"
-    )
-
-    four_h = parallel_scan(
-        symbols,
-        analyze_4h
-    )
-
-    print()
-    print(
-        f"✅ 4H uygun: "
-        f"{len(four_h)}"
-    )
-
-    if not four_h:
-
-        print(
-            "⚪ 4H aday yok."
-        )
-
-        return
-
-    # ========================================================
-    # 1H
-    # ========================================================
-
-    print()
-    print(
-        f"🔎 1H GÜÇ TEYİDİ: "
-        f"{len(four_h)} coin"
-    )
-
-    one_h = parallel_scan(
-        four_h,
-        analyze_1h
-    )
-
-    print()
-    print(
-        f"✅ 1H uygun: "
-        f"{len(one_h)}"
-    )
-
-    if not one_h:
-
-        print(
-            "⚪ 1H teyidi yok."
-        )
-
-        return
-
-    # ========================================================
-    # 15M
-    # ========================================================
-
-    print()
-    print(
-        f"🔎 15M TETİK: "
-        f"{len(one_h)} coin"
-    )
-
-    final = parallel_scan(
-        one_h,
-        analyze_15m
-    )
-
-    # ========================================================
-    # SIRALA
-    # ========================================================
-
-    final.sort(
-        key=lambda x: (
-            x["score"],
-            x["vol15"],
-            x["vol1"],
-            x["vol4"]
-        ),
-        reverse=True
-    )
-
-    final = final[
-        :MAX_ALERTS
-    ]
-
-    stats["final"] = len(
-        final
-    )
-
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
-    elapsed = (
-        time.time()
-        - start_time
-    )
-
-    print()
-    print("=" * 60)
-    print("📊 TARAMA TAMAMLANDI")
-    print("=" * 60)
-
-    print(
-        f"Toplam Futures : {len(symbols)}"
-    )
-
-    print(
-        f"4H uygun       : {len(four_h)}"
-    )
-
-    print(
-        f"1H uygun       : {len(one_h)}"
-    )
-
-    print(
-        f"15M uygun      : {stats['fifteen_m']}"
-    )
-
-    print(
-        f"Final aday     : {len(final)}"
-    )
-
-    print(
-        f"Kline başarılı  : {stats['kline_ok']}"
-    )
-
-    print(
-        f"API hata       : {stats['api_error']}"
-    )
-
-    print(
-        f"Süre           : {elapsed:.1f} saniye"
-    )
-
-    # ========================================================
-    # TELEGRAM
-    # ========================================================
-
-    if not final:
-
-        print()
-        print(
-            "⚪ Bu taramada güçlü "
-            "LSK tipi aday bulunamadı."
-        )
-
-        return
-
-    print()
-    print(
-        "🚨 TELEGRAM'A GİDECEKLER:"
-    )
-
-    for c in final:
-
-        print(
-            f"  {c['symbol']} "
-            f"→ {c['score']}/100"
-        )
-
-        message = make_message(
-            c
-        )
-
-        send_telegram(
-            message
-        )
-
-        time.sleep(0.4)
-
-    print()
-    print(
-        "✅ RADAR TAMAMLANDI"
-    )
-
-
-# ============================================================
-# START
-# ============================================================
-
-if __name__ == "__main__":
-
-    main()
+   
