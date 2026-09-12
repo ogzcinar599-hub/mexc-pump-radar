@@ -2,30 +2,47 @@ import os
 import json
 import math
 import time
+import threading
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PRE-PUMP RADAR V15.0
+# 🚀 MEXC PRE-PUMP RADAR V16.0
 #
-# VERİ + TEKNİK + PARA AKIŞI
+# KADEMELİ TARAMA SİSTEMİ
 #
-# 15M + 1H + 4H
-# RSI
-# HACİM
-# MOMENTUM
-# EMA
-# HIGHER LOW
+# 1059 FUTURES
+#       ↓
+# 15M
+#       ↓
+# 40 COIN
+#       ↓
+# 1H
+#       ↓
+# 20 COIN
+#       ↓
+# 4H
+#       ↓
+# 10 COIN
+#       ↓
 # PARA AKIŞI
-# DESTEK / DİRENÇ
+#       ↓
+# FINAL SCORE
+#       ↓
+# TELEGRAM
 #
-# V15:
-# ✅ KLINE DIAGNOSTIC
-# ✅ MS / SEC FALLBACK
-# ✅ TIMEFRAME DURUMU
-# ✅ API HATA RAPORU
-# ✅ SESSİZ ELEME YOK
+# 🔥 RATE LIMIT KORUMASI
+# 🔥 510 RETRY
+# 🔥 15M / 1H / 4H
+# 🔥 RSI
+# 🔥 HACİM
+# 🔥 MOMENTUM
+# 🔥 EMA
+# 🔥 HIGHER LOW
+# 🔥 PARA AKIŞI
+# 🔥 DESTEK / DİRENÇ
+#
+# OTOMATİK İŞLEM AÇMAZ.
 # ============================================================
 
 
@@ -44,47 +61,76 @@ CHAT_ID = os.getenv(
 
 
 # ============================================================
-# AYARLAR
+# GENEL AYARLAR
 # ============================================================
 
 MAX_SYMBOLS = 120
 
-MAX_WORKERS = 6
+STAGE_15M = 120
 
-DEALS_LIMIT = 100
+STAGE_1H = 40
 
-KLINE_COUNT = 90
+STAGE_4H = 20
+
+STAGE_FLOW = 10
 
 MAX_ALERTS = 5
 
-MIN_ALERT_SCORE = 60
+MIN_ALERT_SCORE = 58
+
+
+# ============================================================
+# LİKİDİTE
+# ============================================================
 
 MIN_24H_AMOUNT = 100_000
 
-MIN_OPEN_NOTIONAL = 10_000
 
-STATE_FILE = "signal_state_v15.json"
+# ============================================================
+# RATE LIMIT
+#
+# MEXC 510 almamak için istekler aralıklı gönderiliyor.
+#
+# 0.12 saniye ≈ 8.3 request/sec
+# ============================================================
+
+REQUEST_INTERVAL = 0.13
+
+MAX_510_RETRY = 4
+
+BACKOFF_BASE = 1.0
+
+
+rate_lock = threading.Lock()
+
+last_request_time = 0.0
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+STATE_FILE = "signal_state_v16.json"
 
 STATE_TTL = 1800
 
 
 # ============================================================
-# TIMEFRAMES
+# KLINE
 # ============================================================
 
-TIMEFRAMES = {
-
-    "15M": "Min15",
-
-    "1H": "Min60",
-
-    "4H": "Hour4"
-
-}
+KLINE_COUNT = 90
 
 
 # ============================================================
-# BAD ENSTRÜMANLAR
+# DEALS
+# ============================================================
+
+DEALS_LIMIT = 100
+
+
+# ============================================================
+# BAD COINS / ENSTRÜMANLAR
 # ============================================================
 
 BAD_NAMES = {
@@ -130,7 +176,7 @@ session = requests.Session()
 session.headers.update({
 
     "User-Agent":
-        "Mozilla/5.0 MEXC-PRE-PUMP-RADAR/15.0",
+        "Mozilla/5.0 MEXC-PRE-PUMP-RADAR/16.0",
 
     "Accept":
         "application/json"
@@ -144,15 +190,21 @@ session.headers.update({
 
 stats = {
 
-    "analyzed": 0,
+    "futures": 0,
 
-    "kline15_ok": 0,
+    "stage15": 0,
 
-    "kline1h_ok": 0,
+    "stage1h": 0,
 
-    "kline4h_ok": 0,
+    "stage4h": 0,
 
-    "all_kline_ok": 0,
+    "stageflow": 0,
+
+    "kline15": 0,
+
+    "kline1h": 0,
+
+    "kline4h": 0,
 
     "money_ok": 0,
 
@@ -164,26 +216,15 @@ stats = {
 
     "setup_ok": 0,
 
-    "near_resistance": 0,
-
-    "overheated": 0,
-
-    "breakout": 0,
-
     "final": 0,
 
-    "kline_error": 0,
+    "alerts": 0,
 
-    "flow_error": 0
+    "rate_510": 0,
+
+    "api_error": 0
 
 }
-
-
-# ============================================================
-# KLINE HATA SAYACI
-# ============================================================
-
-kline_errors = {}
 
 
 # ============================================================
@@ -227,7 +268,7 @@ def clamp(
 
 
 # ============================================================
-# MONEY
+# MONEY FORMAT
 # ============================================================
 
 def money(
@@ -254,7 +295,7 @@ def money(
 
 
 # ============================================================
-# PRICE
+# PRICE FORMAT
 # ============================================================
 
 def price(
@@ -283,7 +324,40 @@ def price(
 
 
 # ============================================================
-# API
+# RATE LIMIT
+# ============================================================
+
+def rate_wait():
+
+    global last_request_time
+
+    with rate_lock:
+
+        now = time.time()
+
+        elapsed = (
+
+            now
+            -
+            last_request_time
+
+        )
+
+        if elapsed < REQUEST_INTERVAL:
+
+            time.sleep(
+
+                REQUEST_INTERVAL
+                -
+                elapsed
+
+            )
+
+        last_request_time = time.time()
+
+
+# ============================================================
+# API GET
 # ============================================================
 
 def api_get(
@@ -291,51 +365,162 @@ def api_get(
     params=None
 ):
 
-    try:
+    global last_request_time
 
-        response = session.get(
+    for attempt in range(
+        MAX_510_RETRY + 1
+    ):
 
-            url,
-
-            params=params,
-
-            timeout=15
-
-        )
-
-        if not response.ok:
-
-            print(
-
-                "API HTTP:",
-                response.status_code,
-                url
-
-            )
-
-            return None
+        rate_wait()
 
         try:
 
-            return response.json()
+            response = session.get(
 
-        except Exception:
+                url,
+
+                params=params,
+
+                timeout=15
+
+            )
+
+            # ==================================================
+            # 510 RATE LIMIT
+            # ==================================================
+
+            if response.status_code == 510:
+
+                stats[
+                    "rate_510"
+                ] += 1
+
+                wait_time = (
+
+                    BACKOFF_BASE
+                    *
+                    (
+                        2 ** attempt
+                    )
+
+                )
+
+                print(
+
+                    f"⚠️ 510 RATE LIMIT | "
+                    f"{wait_time:.1f}s bekleniyor"
+
+                )
+
+                time.sleep(
+                    wait_time
+                )
+
+                continue
+
+            # ==================================================
+            # OTHER HTTP ERROR
+            # ==================================================
+
+            if not response.ok:
+
+                stats[
+                    "api_error"
+                ] += 1
+
+                print(
+
+                    "API HTTP:",
+                    response.status_code,
+                    url
+
+                )
+
+                return None
+
+            # ==================================================
+            # JSON
+            # ==================================================
+
+            try:
+
+                data = response.json()
+
+            except Exception:
+
+                stats[
+                    "api_error"
+                ] += 1
+
+                return None
+
+            # ==================================================
+            # API 510 BODY
+            # ==================================================
+
+            if isinstance(
+                data,
+                dict
+            ):
+
+                code = str(
+
+                    data.get(
+                        "code",
+                        ""
+                    )
+
+                )
+
+                if code == "510":
+
+                    stats[
+                        "rate_510"
+                    ] += 1
+
+                    wait_time = (
+
+                        BACKOFF_BASE
+                        *
+                        (
+                            2 ** attempt
+                        )
+
+                    )
+
+                    print(
+
+                        f"⚠️ API 510 | "
+                        f"{wait_time:.1f}s bekle"
+
+                    )
+
+                    time.sleep(
+                        wait_time
+                    )
+
+                    continue
+
+            return data
+
+        except Exception as e:
+
+            stats[
+                "api_error"
+            ] += 1
 
             print(
-                "JSON HATASI:",
-                url
+                "API HATASI:",
+                e
+            )
+
+            time.sleep(
+                0.5
             )
 
             return None
 
-    except Exception as e:
-
-        print(
-            "API HATASI:",
-            e
-        )
-
-        return None
+    return None
 
 
 # ============================================================
@@ -635,13 +820,7 @@ def get_tickers():
 
 
 # ============================================================
-# 🔥 KLINE V15
-#
-# Önce saniye dener.
-# Sonuç yoksa milisaniye dener.
-#
-# Böylece timestamp problemi varsa
-# direkt yakalıyoruz.
+# KLINE
 # ============================================================
 
 def get_kline(
@@ -670,7 +849,7 @@ def get_kline(
         time.time()
     )
 
-    start_sec = (
+    start = (
 
         now
         -
@@ -682,212 +861,138 @@ def get_kline(
 
     )
 
-    end_sec = now
+    end = now
 
-    attempts = [
+    data = api_get(
 
-        (
-            "SECONDS",
-            start_sec,
-            end_sec
-        ),
+        f"{BASE}/api/v1/contract/kline/{symbol}",
 
-        (
-            "MILLISECONDS",
-            start_sec * 1000,
-            end_sec * 1000
-        )
+        {
+
+            "interval":
+                interval,
+
+            "start":
+                start,
+
+            "end":
+                end
+
+        }
+
+    )
+
+    if not isinstance(
+        data,
+        dict
+    ):
+
+        return []
+
+    raw = data.get(
+        "data"
+    )
+
+    if not isinstance(
+        raw,
+        dict
+    ):
+
+        return []
+
+    required = [
+
+        "open",
+        "close",
+        "high",
+        "low",
+        "vol"
 
     ]
 
-    for mode, start, end in attempts:
+    if any(
 
-        data = api_get(
+        key not in raw
 
-            f"{BASE}/api/v1/contract/kline/{symbol}",
+        for key in required
 
-            {
+    ):
 
-                "interval":
-                    interval,
+        return []
 
-                "start":
-                    start,
+    try:
 
-                "end":
-                    end
+        count = min(
 
-            }
-
-        )
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
-            continue
-
-        # ====================================================
-        # API ERROR
-        # ====================================================
-
-        if data.get(
-            "success"
-        ) is False:
-
-            error_code = str(
-
-                data.get(
-                    "code",
-                    data.get(
-                        "errorCode",
-                        "UNKNOWN"
-                    )
-                )
-
+            len(
+                raw[key]
             )
-
-            key = (
-
-                f"{interval}:"
-                f"{error_code}"
-
-            )
-
-            kline_errors[key] = (
-
-                kline_errors.get(
-                    key,
-                    0
-                )
-                +
-                1
-
-            )
-
-            continue
-
-        # ====================================================
-        # DATA
-        # ====================================================
-
-        raw = data.get(
-            "data"
-        )
-
-        if not isinstance(
-            raw,
-            dict
-        ):
-
-            continue
-
-        required = [
-
-            "open",
-            "close",
-            "high",
-            "low",
-            "vol"
-
-        ]
-
-        if any(
-
-            key not in raw
 
             for key in required
 
+        )
+
+    except Exception:
+
+        return []
+
+    if count < 60:
+
+        return []
+
+    candles = []
+
+    for i in range(
+        count
+    ):
+
+        o = fnum(
+            raw["open"][i]
+        )
+
+        c = fnum(
+            raw["close"][i]
+        )
+
+        h = fnum(
+            raw["high"][i]
+        )
+
+        l = fnum(
+            raw["low"][i]
+        )
+
+        v = fnum(
+            raw["vol"][i]
+        )
+
+        if (
+
+            c <= 0
+            or
+            h <= 0
+            or
+            l <= 0
+
         ):
 
             continue
 
-        try:
+        candles.append({
 
-            count = min(
+            "open": o,
 
-                len(
-                    raw[key]
-                )
+            "close": c,
 
-                for key in required
+            "high": h,
 
-            )
+            "low": l,
 
-        except Exception:
+            "vol": v
 
-            continue
+        })
 
-        if count < 60:
-
-            continue
-
-        candles = []
-
-        for i in range(
-            count
-        ):
-
-            o = fnum(
-                raw["open"][i]
-            )
-
-            c = fnum(
-                raw["close"][i]
-            )
-
-            h = fnum(
-                raw["high"][i]
-            )
-
-            l = fnum(
-                raw["low"][i]
-            )
-
-            v = fnum(
-                raw["vol"][i]
-            )
-
-            if (
-
-                c <= 0
-                or
-                h <= 0
-                or
-                l <= 0
-
-            ):
-
-                continue
-
-            candles.append({
-
-                "open": o,
-
-                "close": c,
-
-                "high": h,
-
-                "low": l,
-
-                "vol": v
-
-            })
-
-        if len(candles) >= 60:
-
-            return candles
-
-    # ========================================================
-    # TAMAMEN BAŞARISIZ
-    # ========================================================
-
-    stats[
-        "kline_error"
-    ] += 1
-
-    return []
+    return candles
 
 
 # ============================================================
@@ -909,7 +1014,6 @@ def analyze_tf(
     closes = [
 
         x["close"]
-
         for x in candles
 
     ]
@@ -917,7 +1021,6 @@ def analyze_tf(
     highs = [
 
         x["high"]
-
         for x in candles
 
     ]
@@ -925,7 +1028,6 @@ def analyze_tf(
     lows = [
 
         x["low"]
-
         for x in candles
 
     ]
@@ -933,7 +1035,6 @@ def analyze_tf(
     volumes = [
 
         x["vol"]
-
         for x in candles
 
     ]
@@ -977,7 +1078,7 @@ def analyze_tf(
             volumes[-21:-1]
         )
         /
-        20.0
+        20
 
     )
 
@@ -1333,18 +1434,6 @@ def get_open_flow(
 
     ) * 100
 
-    if net > 0:
-
-        direction = "LONG"
-
-    elif net < 0:
-
-        direction = "SHORT"
-
-    else:
-
-        direction = "NEUTRAL"
-
     return {
 
         "buy":
@@ -1369,17 +1458,14 @@ def get_open_flow(
             buy_count,
 
         "sell_count":
-            sell_count,
-
-        "direction":
-            direction
+            sell_count
 
     }
 
 
 # ============================================================
-# MONEY SCORE
-# MAX 30
+# PARA PUANI
+# MAX 25
 # ============================================================
 
 def money_score(
@@ -1431,29 +1517,21 @@ def money_score(
 
     if net_pct >= 8:
 
-        score += 3
+        score += 2
 
     if net_pct >= 15:
 
-        score += 3
+        score += 2
 
     if net_pct >= 25:
 
-        score += 3
+        score += 2
 
     if buy_share >= 52:
 
         score += 1
 
-    if buy_share >= 56:
-
-        score += 1
-
-    if buy_share >= 62:
-
-        score += 1
-
-    if buy_share >= 70:
+    if buy_share >= 58:
 
         score += 1
 
@@ -1468,30 +1546,154 @@ def money_score(
 
     )
 
-    if ratio >= 0.0002:
-
-        score += 1
-
-    if ratio >= 0.0005:
-
-        score += 1
-
-    if ratio >= 0.001:
+    if ratio >= 0.0003:
 
         score += 1
 
     return min(
         score,
-        30
+        25
     )
 
 
 # ============================================================
-# TECHNICAL SCORE
-# MAX 40
+# 15M PUANI
+#
+# İlk aşamada hızlı eleme.
+# MAX 100
 # ============================================================
 
-def technical_score(
+def stage15_score(
+    t
+):
+
+    if not t:
+
+        return 0
+
+    score = 0
+
+    # RSI
+    if 42 <= t["rsi"] <= 68:
+
+        score += 25
+
+    elif 68 < t["rsi"] <= 75:
+
+        score += 15
+
+    elif 38 <= t["rsi"] < 42:
+
+        score += 10
+
+    # EMA
+    if t["trend"] == "BULL":
+
+        score += 25
+
+    elif t["trend"] == "MIXED":
+
+        score += 15
+
+    # RSI yükseliş
+    if t["rsi"] > t["rsi_prev"]:
+
+        score += 15
+
+    # Higher low
+    if t["higher_low"]:
+
+        score += 15
+
+    # Momentum
+    if t["momentum"]:
+
+        score += 10
+
+    # Çok fazla pump olmuşsa düşür
+    if t["recent_move"] > 8:
+
+        score -= 10
+
+    if t["recent_move"] > 12:
+
+        score -= 15
+
+    return int(
+        clamp(
+            score,
+            0,
+            100
+        )
+    )
+
+
+# ============================================================
+# 1H PUANI
+# ============================================================
+
+def stage1h_score(
+    t15,
+    t1
+):
+
+    score = 0
+
+    # 1H trend
+    if t1["trend"] == "BULL":
+
+        score += 25
+
+    elif t1["trend"] == "MIXED":
+
+        score += 17
+
+    # 15M trend
+    if t15["trend"] == "BULL":
+
+        score += 15
+
+    elif t15["trend"] == "MIXED":
+
+        score += 10
+
+    # RSI
+    if 43 <= t15["rsi"] <= 68:
+
+        score += 20
+
+    elif 68 < t15["rsi"] <= 76:
+
+        score += 12
+
+    # Higher low
+    if t15["higher_low"]:
+
+        score += 15
+
+    if t1["higher_low"]:
+
+        score += 15
+
+    # Momentum
+    if t15["momentum"]:
+
+        score += 10
+
+    return int(
+        clamp(
+            score,
+            0,
+            100
+        )
+    )
+
+
+# ============================================================
+# 4H PUANI
+# ============================================================
+
+def stage4h_score(
     t15,
     t1,
     t4
@@ -1499,109 +1701,57 @@ def technical_score(
 
     score = 0
 
-    if t4[
-        "trend"
-    ] == "BULL":
+    # 4H
+    if t4["trend"] == "BULL":
 
-        score += 8
+        score += 30
 
-    elif t4[
-        "trend"
-    ] == "MIXED":
+    elif t4["trend"] == "MIXED":
 
-        score += 5
+        score += 20
 
-    if t1[
-        "trend"
-    ] == "BULL":
+    # 1H
+    if t1["trend"] == "BULL":
 
-        score += 8
+        score += 20
 
-    elif t1[
-        "trend"
-    ] == "MIXED":
+    elif t1["trend"] == "MIXED":
 
-        score += 5
+        score += 12
 
-    if t15[
-        "trend"
-    ] == "BULL":
+    # 15M
+    if t15["trend"] == "BULL":
 
-        score += 6
+        score += 10
 
-    elif t15[
-        "trend"
-    ] == "MIXED":
+    elif t15["trend"] == "MIXED":
 
-        score += 4
+        score += 7
 
-    if (
+    # Higher low
+    if t15["higher_low"]:
 
-        43
-        <=
-        t15["rsi"]
-        <=
-        68
+        score += 10
 
-    ):
+    if t1["higher_low"]:
 
-        score += 6
+        score += 10
 
-    elif (
+    if t4["higher_low"]:
 
-        68
-        <
-        t15["rsi"]
-        <=
-        75
+        score += 10
 
-    ):
-
-        score += 3
-
-    if (
-
-        t15["rsi"]
-        >
-        t15["rsi_prev"]
-
-    ):
-
-        score += 3
-
-    if t15[
-        "higher_low"
-    ]:
-
-        score += 3
-
-    if t1[
-        "higher_low"
-    ]:
-
-        score += 2
-
-    if t15[
-        "higher_high"
-    ]:
-
-        score += 1
-
-    if t15[
-        "momentum"
-    ]:
-
-        score += 2
-
-    return min(
-        score,
-        40
+    return int(
+        clamp(
+            score,
+            0,
+            100
+        )
     )
 
 
 # ============================================================
-# VOLUME SCORE
-# MAX 15
+# HACİM
 # ============================================================
 
 def volume_score(
@@ -1649,17 +1799,109 @@ def volume_score(
 
 
 # ============================================================
-# SETUP SCORE
-# MAX 15
+# FINAL SCORE
+#
+# 25 PARA
+# 35 TEKNİK
+# 15 HACİM
+# 15 SETUP
+# 10 4H
+#
+# = 100
 # ============================================================
 
-def setup_score(
+def final_score(
     t15,
     t1,
-    t4
+    t4,
+    flow,
+    amount24,
+    change24
 ):
 
-    score = 0
+    # --------------------------------------------------------
+    # MONEY
+    # --------------------------------------------------------
+
+    m = money_score(
+
+        flow,
+
+        amount24
+
+    )
+
+    # --------------------------------------------------------
+    # TECH
+    # --------------------------------------------------------
+
+    tech = 0
+
+    # 15M
+    if t15["trend"] == "BULL":
+
+        tech += 8
+
+    elif t15["trend"] == "MIXED":
+
+        tech += 5
+
+    # 1H
+    if t1["trend"] == "BULL":
+
+        tech += 10
+
+    elif t1["trend"] == "MIXED":
+
+        tech += 6
+
+    # RSI
+    if 43 <= t15["rsi"] <= 68:
+
+        tech += 8
+
+    elif 68 < t15["rsi"] <= 76:
+
+        tech += 4
+
+    # RSI yükseliyor
+    if t15["rsi"] > t15["rsi_prev"]:
+
+        tech += 4
+
+    # Higher low
+    if t15["higher_low"]:
+
+        tech += 3
+
+    if t1["higher_low"]:
+
+        tech += 2
+
+    # Momentum
+    if t15["momentum"]:
+
+        tech += 3
+
+    tech = min(
+        tech,
+        35
+    )
+
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
+
+    vol = volume_score(
+        t15,
+        t1
+    )
+
+    # --------------------------------------------------------
+    # SETUP
+    # --------------------------------------------------------
+
+    setup = 0
 
     distance = min(
 
@@ -1669,83 +1911,117 @@ def setup_score(
 
     )
 
-    if (
+    if 0 <= distance <= 3:
 
-        0
-        <=
-        distance
-        <=
-        2
+        setup += 7
 
-    ):
+    elif 3 < distance <= 6:
 
-        score += 5
+        setup += 5
 
-    elif (
+    elif 6 < distance <= 10:
 
-        2
-        <
-        distance
-        <=
-        5
+        setup += 2
 
-    ):
+    if t15["higher_low"]:
 
-        score += 4
+        setup += 3
 
-    elif (
+    if t1["higher_low"]:
 
-        5
-        <
-        distance
-        <=
-        8
+        setup += 3
 
-    ):
+    if t15["momentum"]:
 
-        score += 2
+        setup += 2
 
-    if t15[
-        "higher_low"
-    ]:
-
-        score += 3
-
-    if t1[
-        "higher_low"
-    ]:
-
-        score += 2
-
-    if t15[
-        "higher_high"
-    ]:
-
-        score += 1
-
-    if t15[
-        "momentum"
-    ]:
-
-        score += 2
-
-    if (
-
-        t4["trend"]
-        ==
-        "MIXED"
-
-        and
-
-        t1["higher_low"]
-
-    ):
-
-        score += 2
-
-    return min(
-        score,
+    setup = min(
+        setup,
         15
+    )
+
+    # --------------------------------------------------------
+    # 4H
+    # --------------------------------------------------------
+
+    h4 = 0
+
+    if t4["trend"] == "BULL":
+
+        h4 += 7
+
+    elif t4["trend"] == "MIXED":
+
+        h4 += 4
+
+    if t4["higher_low"]:
+
+        h4 += 3
+
+    h4 = min(
+        h4,
+        10
+    )
+
+    # --------------------------------------------------------
+    # TOTAL
+    # --------------------------------------------------------
+
+    total = (
+
+        m
+        +
+        tech
+        +
+        vol
+        +
+        setup
+        +
+        h4
+
+    )
+
+    # --------------------------------------------------------
+    # CEZALAR
+    # --------------------------------------------------------
+
+    if change24 >= 15:
+
+        total -= 3
+
+    if change24 >= 25:
+
+        total -= 5
+
+    if change24 >= 40:
+
+        total -= 8
+
+    if t15["rsi"] > 78:
+
+        total -= 15
+
+    if t1["rsi"] > 78:
+
+        total -= 10
+
+    # Zaten direnç kırıldıysa PRE-PUMP değil.
+    if (
+
+        t15["breakout"]
+        or
+        t1["breakout"]
+
+    ):
+
+        total -= 10
+
+    return int(
+        clamp(
+            round(total),
+            0,
+            100
+        )
     )
 
 
@@ -1912,16 +2188,10 @@ def build_plan(
     return {
 
         "entry_low":
-            min(
-                entry_low,
-                entry_high
-            ),
+            entry_low,
 
         "entry_high":
-            max(
-                entry_low,
-                entry_high
-            ),
+            entry_high,
 
         "breakout":
             breakout,
@@ -1948,129 +2218,368 @@ def build_plan(
 
 
 # ============================================================
-# ANALİZ
+# STAGE 1
+#
+# 15M
+#
+# 120 COIN
 # ============================================================
 
-def analyze_symbol(
-    symbol,
-    contract_size,
-    ticker
+def scan_15m(
+    candidates
 ):
 
-    try:
+    print()
 
-        amount24 = fnum(
+    print(
+        "🟢 AŞAMA 1 | 15M TARAMA"
+    )
 
-            ticker.get(
-                "amount24"
-            )
+    results = []
 
-        )
+    for index, item in enumerate(
 
-        last_price = fnum(
+        candidates,
 
-            ticker.get(
-                "lastPrice"
-            )
+        1
 
-        )
+    ):
 
-        if (
+        symbol = item[
+            "symbol"
+        ]
 
-            amount24
-            <
-            MIN_24H_AMOUNT
+        ticker = item[
+            "ticker"
+        ]
 
-            or
+        candles = get_kline(
 
-            last_price
-            <=
-            0
-
-        ):
-
-            return None
-
-        # ====================================================
-        # KLINE
-        # ====================================================
-
-        c15 = get_kline(
             symbol,
+
             "Min15"
+
         )
 
-        c1 = get_kline(
-            symbol,
-            "Min60"
-        )
+        if not candles:
 
-        c4 = get_kline(
-            symbol,
-            "Hour4"
-        )
-
-        if c15:
-
-            stats[
-                "kline15_ok"
-            ] += 1
-
-        if c1:
-
-            stats[
-                "kline1h_ok"
-            ] += 1
-
-        if c4:
-
-            stats[
-                "kline4h_ok"
-            ] += 1
-
-        if not c15:
-
-            return None
-
-        if not c1:
-
-            return None
-
-        if not c4:
-
-            return None
+            continue
 
         stats[
-            "all_kline_ok"
+            "kline15"
         ] += 1
 
         t15 = analyze_tf(
-            c15
-        )
-
-        t1 = analyze_tf(
-            c1
-        )
-
-        t4 = analyze_tf(
-            c4
+            candles
         )
 
         if not t15:
 
-            return None
+            continue
+
+        score = stage15_score(
+            t15
+        )
+
+        results.append({
+
+            **item,
+
+            "t15":
+                t15,
+
+            "stage_score":
+                score
+
+        })
+
+        if index % 20 == 0:
+
+            print(
+
+                f"15M: "
+                f"{index}/"
+                f"{len(candidates)}"
+
+            )
+
+    results.sort(
+
+        key=lambda x:
+            x["stage_score"],
+
+        reverse=True
+
+    )
+
+    results = results[
+        :STAGE_1H
+    ]
+
+    stats[
+        "stage15"
+    ] = len(results)
+
+    print(
+
+        f"✅ 15M → "
+        f"{len(results)} coin"
+
+    )
+
+    return results
+
+
+# ============================================================
+# STAGE 2
+#
+# 1H
+#
+# 40 COIN
+# ============================================================
+
+def scan_1h(
+    candidates
+):
+
+    print()
+
+    print(
+        "🟡 AŞAMA 2 | 1H TARAMA"
+    )
+
+    results = []
+
+    for index, item in enumerate(
+
+        candidates,
+
+        1
+
+    ):
+
+        symbol = item[
+            "symbol"
+        ]
+
+        candles = get_kline(
+
+            symbol,
+
+            "Min60"
+
+        )
+
+        if not candles:
+
+            continue
+
+        stats[
+            "kline1h"
+        ] += 1
+
+        t1 = analyze_tf(
+            candles
+        )
 
         if not t1:
 
-            return None
+            continue
+
+        t15 = item[
+            "t15"
+        ]
+
+        score = stage1h_score(
+
+            t15,
+            t1
+
+        )
+
+        results.append({
+
+            **item,
+
+            "t1":
+                t1,
+
+            "stage_score":
+                score
+
+        })
+
+    results.sort(
+
+        key=lambda x:
+            x["stage_score"],
+
+        reverse=True
+
+    )
+
+    results = results[
+        :STAGE_4H
+    ]
+
+    stats[
+        "stage1h"
+    ] = len(results)
+
+    print(
+
+        f"✅ 1H → "
+        f"{len(results)} coin"
+
+    )
+
+    return results
+
+
+# ============================================================
+# STAGE 3
+#
+# 4H
+#
+# 20 COIN
+# ============================================================
+
+def scan_4h(
+    candidates
+):
+
+    print()
+
+    print(
+        "🟠 AŞAMA 3 | 4H TARAMA"
+    )
+
+    results = []
+
+    for index, item in enumerate(
+
+        candidates,
+
+        1
+
+    ):
+
+        symbol = item[
+            "symbol"
+        ]
+
+        candles = get_kline(
+
+            symbol,
+
+            "Hour4"
+
+        )
+
+        if not candles:
+
+            continue
+
+        stats[
+            "kline4h"
+        ] += 1
+
+        t4 = analyze_tf(
+            candles
+        )
 
         if not t4:
 
-            return None
+            continue
 
-        # ====================================================
-        # PARA AKIŞI
-        # ====================================================
+        t15 = item[
+            "t15"
+        ]
+
+        t1 = item[
+            "t1"
+        ]
+
+        score = stage4h_score(
+
+            t15,
+            t1,
+            t4
+
+        )
+
+        results.append({
+
+            **item,
+
+            "t4":
+                t4,
+
+            "stage_score":
+                score
+
+        })
+
+    results.sort(
+
+        key=lambda x:
+            x["stage_score"],
+
+        reverse=True
+
+    )
+
+    results = results[
+        :STAGE_FLOW
+    ]
+
+    stats[
+        "stage4h"
+    ] = len(results)
+
+    print(
+
+        f"✅ 4H → "
+        f"{len(results)} coin"
+
+    )
+
+    return results
+
+
+# ============================================================
+# STAGE 4
+#
+# PARA AKIŞI
+#
+# SADECE 10 COIN
+# ============================================================
+
+def scan_flow(
+    candidates
+):
+
+    print()
+
+    print(
+        "🔴 AŞAMA 4 | PARA AKIŞI"
+    )
+
+    results = []
+
+    for item in candidates:
+
+        symbol = item[
+            "symbol"
+        ]
+
+        contract_size = item[
+            "contract_size"
+        ]
+
+        ticker = item[
+            "ticker"
+        ]
 
         flow = get_open_flow(
 
@@ -2080,50 +2589,13 @@ def analyze_symbol(
 
         )
 
-        if not flow:
+        amount24 = fnum(
 
-            stats[
-                "flow_error"
-            ] += 1
-
-        # ====================================================
-        # SCORE
-        # ====================================================
-
-        money_points = money_score(
-
-            flow,
-
-            amount24
+            ticker.get(
+                "amount24"
+            )
 
         )
-
-        technical_points = technical_score(
-
-            t15,
-            t1,
-            t4
-
-        )
-
-        volume_points = volume_score(
-
-            t15,
-            t1
-
-        )
-
-        setup_points = setup_score(
-
-            t15,
-            t1,
-            t4
-
-        )
-
-        # ====================================================
-        # 24H
-        # ====================================================
 
         change24 = (
 
@@ -2139,169 +2611,88 @@ def analyze_symbol(
 
         )
 
-        # ====================================================
-        # OVERHEATED
-        # ====================================================
+        score = final_score(
 
-        overheated = (
+            item["t15"],
 
-            t15["rsi"] > 78
+            item["t1"],
 
-            or
+            item["t4"],
 
-            t1["rsi"] > 78
+            flow,
 
-        )
+            amount24,
 
-        # ====================================================
-        # BREAKOUT
-        # ====================================================
-
-        breakout = (
-
-            t15["breakout"]
-
-            or
-
-            t1["breakout"]
+            change24
 
         )
 
-        # ====================================================
-        # PENALTY
-        # ====================================================
+        results.append({
 
-        penalty = 0
+            **item,
 
-        if change24 >= 15:
+            "flow":
+                flow,
 
-            penalty += 3
+            "final_score":
+                score,
 
-        if change24 >= 25:
+            "change24":
+                change24
 
-            penalty += 5
+        })
 
-        if change24 >= 40:
+    results.sort(
 
-            penalty += 8
+        key=lambda x:
+            x["final_score"],
 
-        if change24 >= 60:
+        reverse=True
 
-            penalty += 10
+    )
 
-        if overheated:
+    stats[
+        "stageflow"
+    ] = len(results)
 
-            penalty += 15
+    return results
 
-        if breakout:
 
-            penalty += 8
+# ============================================================
+# FINAL FİLTRE
+# ============================================================
 
-        # ====================================================
-        # TOTAL
-        # ====================================================
+def final_filter(
+    items
+):
 
-        raw_score = (
+    results = []
 
-            money_points
-            +
-            technical_points
-            +
-            volume_points
-            +
-            setup_points
+    for item in items:
 
-        )
+        t15 = item[
+            "t15"
+        ]
 
-        final_score = int(
+        t1 = item[
+            "t1"
+        ]
 
-            clamp(
+        t4 = item[
+            "t4"
+        ]
 
-                round(
-                    raw_score
-                    -
-                    penalty
-                ),
+        flow = item[
+            "flow"
+        ]
 
-                0,
+        score = item[
+            "final_score"
+        ]
 
-                100
-
-            )
-
-        )
-
-        # ====================================================
-        # MONEY OK
-        # ====================================================
-
-        money_ok = False
-
-        if flow:
-
-            money_ok = (
-
-                flow["total"]
-                >=
-                MIN_OPEN_NOTIONAL
-
-                and
-
-                flow["net_pct"]
-                >=
-                2
-
-                and
-
-                flow["buy_share"]
-                >=
-                51
-
-            )
-
-        # ====================================================
-        # TREND
-        # ====================================================
-
-        trend_ok = (
-
-            t4["trend"]
-            in (
-                "BULL",
-                "MIXED"
-            )
-
-            and
-
-            t1["trend"]
-            in (
-                "BULL",
-                "MIXED"
-            )
-
-        )
-
-        # ====================================================
-        # RECOVERY
-        # ====================================================
-
-        if not trend_ok:
-
-            if (
-
-                t1["trend"]
-                ==
-                "BULL"
-
-                and
-
-                t15["trend"]
-                !=
-                "BEAR"
-
-            ):
-
-                trend_ok = True
+        change24 = item[
+            "change24"
+        ]
 
         # ====================================================
         # RSI
@@ -2317,8 +2708,14 @@ def analyze_symbol(
 
         )
 
+        if rsi_ok:
+
+            stats[
+                "rsi_ok"
+            ] += 1
+
         # ====================================================
-        # VOLUME
+        # HACİM
         # ====================================================
 
         volume_ok = (
@@ -2335,28 +2732,54 @@ def analyze_symbol(
 
         )
 
+        if volume_ok:
+
+            stats[
+                "volume_ok"
+            ] += 1
+
         # ====================================================
-        # RESISTANCE
+        # TREND
         # ====================================================
 
-        res_distance = min(
+        trend_ok = (
 
-            t15["dist_res"],
-
-            t1["dist_res"]
+            t1["trend"]
+            in (
+                "BULL",
+                "MIXED"
+            )
 
         )
 
-        near_resistance = (
+        if (
 
-            res_distance
-            <=
-            8
+            not trend_ok
 
-        )
+            and
+
+            t1["trend"]
+            ==
+            "BEAR"
+
+            and
+
+            t15["trend"]
+            ==
+            "BULL"
+
+        ):
+
+            trend_ok = True
+
+        if trend_ok:
+
+            stats[
+                "trend_ok"
+            ] += 1
 
         # ====================================================
-        # STRUCTURE
+        # SETUP
         # ====================================================
 
         setup_ok = (
@@ -2373,9 +2796,33 @@ def analyze_symbol(
 
         )
 
+        if setup_ok:
+
+            stats[
+                "setup_ok"
+            ] += 1
+
         # ====================================================
-        # STATS
+        # MONEY
         # ====================================================
+
+        money_ok = False
+
+        if flow:
+
+            money_ok = (
+
+                flow["net_pct"]
+                >=
+                2
+
+                and
+
+                flow["buy_share"]
+                >=
+                51
+
+            )
 
         if money_ok:
 
@@ -2383,147 +2830,81 @@ def analyze_symbol(
                 "money_ok"
             ] += 1
 
-        if volume_ok:
+        # ====================================================
+        # OVERHEATED
+        # ====================================================
 
-            stats[
-                "volume_ok"
-            ] += 1
+        overheated = (
 
-        if trend_ok:
+            t15["rsi"] > 78
 
-            stats[
-                "trend_ok"
-            ] += 1
+            or
 
-        if rsi_ok:
+            t1["rsi"] > 78
 
-            stats[
-                "rsi_ok"
-            ] += 1
-
-        if setup_ok:
-
-            stats[
-                "setup_ok"
-            ] += 1
-
-        if near_resistance:
-
-            stats[
-                "near_resistance"
-            ] += 1
+        )
 
         if overheated:
 
-            stats[
-                "overheated"
-            ] += 1
+            continue
+
+        # ====================================================
+        # BREAKOUT
+        # ====================================================
+
+        breakout = (
+
+            t15["breakout"]
+
+            or
+
+            t1["breakout"]
+
+        )
 
         if breakout:
 
-            stats[
-                "breakout"
-            ] += 1
+            continue
 
         # ====================================================
-        # FINAL
+        # HACİM
         # ====================================================
 
-        technical_ready = (
+        if not volume_ok:
 
-            technical_points
-            >=
-            24
+            continue
 
-            and
+        # ====================================================
+        # RSI
+        # ====================================================
 
-            volume_ok
+        if not rsi_ok:
 
-            and
+            continue
 
-            rsi_ok
+        # ====================================================
+        # SKOR
+        # ====================================================
 
-        )
+        if score < MIN_ALERT_SCORE:
 
-        money_ready = (
+            continue
 
-            money_ok
+        # ====================================================
+        # SETUP
+        # ====================================================
 
-            and
+        if not setup_ok:
 
-            technical_points
-            >=
-            18
+            continue
 
-            and
+        # ====================================================
+        # 24H PUMP
+        # ====================================================
 
-            volume_ok
+        if change24 >= 50:
 
-        )
-
-        structure_ready = (
-
-            setup_ok
-
-            and
-
-            volume_ok
-
-            and
-
-            rsi_ok
-
-            and
-
-            trend_ok
-
-            and
-
-            final_score
-            >=
-            MIN_ALERT_SCORE
-
-        )
-
-        candidate = (
-
-            final_score
-            >=
-            MIN_ALERT_SCORE
-
-            and
-
-            not overheated
-
-            and
-
-            not breakout
-
-            and
-
-            volume_ok
-
-            and
-
-            (
-
-                technical_ready
-
-                or
-
-                money_ready
-
-                or
-
-                structure_ready
-
-            )
-
-        )
-
-        if not candidate:
-
-            return None
+            continue
 
         # ====================================================
         # PLAN
@@ -2537,12 +2918,8 @@ def analyze_symbol(
 
         )
 
-        stats[
-            "final"
-        ] += 1
-
         # ====================================================
-        # FLOW DATA
+        # FLOW VALUES
         # ====================================================
 
         if flow:
@@ -2567,25 +2944,13 @@ def analyze_symbol(
 
             open_total = 0
 
-        return {
+        result = {
 
             "symbol":
-                symbol,
+                item["symbol"],
 
             "score":
-                final_score,
-
-            "money_score":
-                money_points,
-
-            "technical_score":
-                technical_points,
-
-            "volume_score":
-                volume_points,
-
-            "setup_score":
-                setup_points,
+                score,
 
             "flow_pct":
                 flow_pct,
@@ -2595,12 +2960,6 @@ def analyze_symbol(
 
             "open_total":
                 open_total,
-
-            "amount24":
-                amount24,
-
-            "change24":
-                change24,
 
             "rsi15":
                 t15["rsi"],
@@ -2620,28 +2979,40 @@ def analyze_symbol(
             "trend4h":
                 t4["trend"],
 
+            "change24":
+                change24,
+
             "res_distance":
-                res_distance,
+                min(
+
+                    t15["dist_res"],
+
+                    t1["dist_res"]
+
+                ),
 
             **plan
 
         }
 
-    except Exception as e:
-
-        print(
-            symbol,
-            "ANALİZ HATASI:",
-            e
+        results.append(
+            result
         )
 
-        return None
+    results.sort(
 
-    finally:
+        key=lambda x:
+            x["score"],
 
-        stats[
-            "analyzed"
-        ] += 1
+        reverse=True
+
+    )
+
+    stats[
+        "final"
+    ] = len(results)
+
+    return results
 
 
 # ============================================================
@@ -2715,7 +3086,7 @@ def save_state(
 
 
 # ============================================================
-# ALERT STATE
+# ALERT CONTROL
 # ============================================================
 
 def should_alert(
@@ -2858,16 +3229,7 @@ def telegram(
 
         )
 
-        if not response.ok:
-
-            print(
-                "TELEGRAM HATASI:",
-                response.text
-            )
-
-            return False
-
-        return True
+        return response.ok
 
     except Exception as e:
 
@@ -2880,7 +3242,7 @@ def telegram(
 
 
 # ============================================================
-# ALERT TEXT
+# ALARM MESAJI
 # ============================================================
 
 def alert_text(
@@ -2913,7 +3275,7 @@ def alert_text(
 
     return (
 
-        "🚨 PRE-PUMP V15\n\n"
+        "🚨 PRE-PUMP V16\n\n"
 
         f"🪙 {x['symbol']}\n"
 
@@ -2941,7 +3303,7 @@ def alert_text(
         "📍 GİRİŞ\n"
 
         f"{price(x['entry_low'])}"
-        f" – "
+        f" - "
         f"{price(x['entry_high'])}\n\n"
 
         "🚀 KIRILIM\n"
@@ -2992,34 +3354,41 @@ def summary_text(
 
     lines = [
 
-        "🛰 MEXC PRE-PUMP RADAR V15",
+        "🛰 MEXC PRE-PUMP RADAR V16",
 
         "",
 
         f"📊 Futures: "
         f"{futures_count}",
 
-        f"🔎 Analiz: "
-        f"{stats['analyzed']}",
+        "",
+
+        "🔎 KADEMELİ TARAMA",
+
+        f"🟢 15M: "
+        f"{stats['stage15']}",
+
+        f"🟡 1H: "
+        f"{stats['stage1h']}",
+
+        f"🟠 4H: "
+        f"{stats['stage4h']}",
+
+        f"🔴 Para akışı: "
+        f"{stats['stageflow']}",
 
         "",
 
-        "🧪 VERİ KONTROLÜ",
+        "📡 KLINE",
 
-        f"🕐 15M OK: "
-        f"{stats['kline15_ok']}",
+        f"15M OK: "
+        f"{stats['kline15']}",
 
-        f"🕐 1H OK: "
-        f"{stats['kline1h_ok']}",
+        f"1H OK: "
+        f"{stats['kline1h']}",
 
-        f"🕐 4H OK: "
-        f"{stats['kline4h_ok']}",
-
-        f"🟢 3 TF OK: "
-        f"{stats['all_kline_ok']}",
-
-        f"❌ Kline hata: "
-        f"{stats['kline_error']}",
+        f"4H OK: "
+        f"{stats['kline4h']}",
 
         "",
 
@@ -3040,14 +3409,13 @@ def summary_text(
         f"📍 Yapı OK: "
         f"{stats['setup_ok']}",
 
-        f"🎯 Direnç yakın: "
-        f"{stats['near_resistance']}",
+        "",
 
-        f"🔥 Aşırı sıcak: "
-        f"{stats['overheated']}",
+        f"⚠️ 510 rate-limit: "
+        f"{stats['rate_510']}",
 
-        f"🚀 Kırılmış: "
-        f"{stats['breakout']}",
+        f"❌ API hata: "
+        f"{stats['api_error']}",
 
         "",
 
@@ -3062,46 +3430,17 @@ def summary_text(
 
     ]
 
-    # ========================================================
-    # KLINE HATALARI
-    # ========================================================
-
-    if kline_errors:
-
-        lines += [
-
-            "",
-
-            "⚠️ KLINE HATALARI"
-
-        ]
-
-        for key, count in list(
-
-            kline_errors.items()
-        )[:5]:
-
-            lines.append(
-
-                f"{key}: {count}"
-
-            )
-
-    # ========================================================
-    # ADAYLAR
-    # ========================================================
-
     if candidates:
 
         lines += [
 
             "",
 
-            "⭐ EN İYİ ADAYLAR"
+            "⭐ EN İYİLER"
 
         ]
 
-        for i, item in enumerate(
+        for i, x in enumerate(
 
             candidates[:10],
 
@@ -3112,14 +3451,14 @@ def summary_text(
             lines.append(
 
                 f"{i}. "
-                f"{item['symbol']} | "
-                f"{item['score']}/100 | "
+                f"{x['symbol']} | "
+                f"{x['score']}/100 | "
                 f"RSI "
-                f"{item['rsi15']:.0f} | "
+                f"{x['rsi15']:.0f} | "
                 f"Vol "
-                f"{item['volume15']:.1f}x | "
+                f"{x['volume15']:.1f}x | "
                 f"Para "
-                f"{item['flow_pct']:+.0f}%"
+                f"{x['flow_pct']:+.0f}%"
 
             )
 
@@ -3143,27 +3482,24 @@ def main():
     )
 
     print(
-        "🚀 MEXC PRE-PUMP RADAR V15.0"
+        "🚀 MEXC PRE-PUMP RADAR V16.0"
     )
 
     print(
-        "🧪 KLINE DIAGNOSTIC AKTİF"
+        "🟢 KADEMELİ TARAMA"
     )
 
     print(
-        "📊 15M + 1H + 4H"
+        "120 → 40 → 20 → 10"
     )
 
     print(
-        "⭐ MIN SCORE:",
-        MIN_ALERT_SCORE
+        "🛡 RATE LIMIT KORUMALI"
     )
 
     print(
         "=" * 65
     )
-
-    print()
 
     # ========================================================
     # CONTRACTS
@@ -3174,8 +3510,12 @@ def main():
     if not contracts:
 
         raise RuntimeError(
-            "Futures kontratları alınamadı."
+            "Futures alınamadı."
         )
+
+    stats[
+        "futures"
+    ] = len(contracts)
 
     # ========================================================
     # TICKERS
@@ -3186,10 +3526,12 @@ def main():
     ticker_map = {
 
         str(
+
             x.get(
                 "symbol",
                 ""
             )
+
         ).upper():
 
         x
@@ -3203,10 +3545,10 @@ def main():
     }
 
     # ========================================================
-    # PRE FILTER
+    # PRE-SELECTION
     # ========================================================
 
-    pre_candidates = []
+    candidates = []
 
     for symbol, contract_size in contracts.items():
 
@@ -3264,13 +3606,14 @@ def main():
 
         )
 
+        # Likidite + henüz patlamamış coin önceliği
         pump_penalty = max(
 
-            change24 - 12,
+            change24 - 10,
 
             0
 
-        ) * 0.5
+        ) * 0.7
 
         rank = (
 
@@ -3290,28 +3633,36 @@ def main():
 
         )
 
-        pre_candidates.append(
+        candidates.append({
 
-            (
-                rank,
-
+            "symbol":
                 symbol,
 
+            "contract_size":
                 contract_size,
 
-                ticker
+            "ticker":
+                ticker,
 
-            )
+            "rank":
+                rank
 
-        )
+        })
 
-    pre_candidates.sort(
+    candidates.sort(
+
+        key=lambda x:
+            x["rank"],
+
         reverse=True
+
     )
 
-    pre_candidates = pre_candidates[
-        :MAX_SYMBOLS
+    candidates = candidates[
+        :STAGE_15M
     ]
+
+    print()
 
     print(
 
@@ -3322,123 +3673,162 @@ def main():
 
     print(
 
-        f"📡 Ticker: "
-        f"{len(tickers)}"
+        f"🔎 15M taranacak: "
+        f"{len(candidates)}"
 
     )
 
-    print(
+    # ========================================================
+    # STAGE 1
+    # ========================================================
 
-        f"🔎 Analiz: "
-        f"{len(pre_candidates)}"
-
+    stage15 = scan_15m(
+        candidates
     )
+
+    if not stage15:
+
+        print(
+            "❌ 15M aday yok."
+        )
+
+        duration = (
+            time.time()
+            -
+            started
+        )
+
+        telegram(
+
+            summary_text(
+
+                len(contracts),
+
+                [],
+
+                [],
+
+                duration
+
+            )
+
+        )
+
+        return
+
+    # ========================================================
+    # STAGE 2
+    # ========================================================
+
+    stage1h = scan_1h(
+        stage15
+    )
+
+    if not stage1h:
+
+        print(
+            "❌ 1H aday yok."
+        )
+
+        duration = (
+            time.time()
+            -
+            started
+        )
+
+        telegram(
+
+            summary_text(
+
+                len(contracts),
+
+                [],
+
+                [],
+
+                duration
+
+            )
+
+        )
+
+        return
+
+    # ========================================================
+    # STAGE 3
+    # ========================================================
+
+    stage4h = scan_4h(
+        stage1h
+    )
+
+    if not stage4h:
+
+        print(
+            "❌ 4H aday yok."
+        )
+
+        duration = (
+            time.time()
+            -
+            started
+        )
+
+        telegram(
+
+            summary_text(
+
+                len(contracts),
+
+                [],
+
+                [],
+
+                duration
+
+            )
+
+        )
+
+        return
+
+    # ========================================================
+    # STAGE 4
+    # ========================================================
+
+    stageflow = scan_flow(
+        stage4h
+    )
+
+    # ========================================================
+    # FINAL
+    # ========================================================
+
+    results = final_filter(
+        stageflow
+    )
+
+    # ========================================================
+    # PRINT
+    # ========================================================
 
     print()
 
-    # ========================================================
-    # ANALYSIS
-    # ========================================================
-
-    results = []
-
-    with ThreadPoolExecutor(
-
-        max_workers=MAX_WORKERS
-
-    ) as executor:
-
-        jobs = {
-
-            executor.submit(
-
-                analyze_symbol,
-
-                symbol,
-
-                contract_size,
-
-                ticker
-
-            ): symbol
-
-            for
-            _rank,
-            symbol,
-            contract_size,
-            ticker
-
-            in pre_candidates
-
-        }
-
-        for future in as_completed(
-            jobs
-        ):
-
-            try:
-
-                result = future.result()
-
-                if result:
-
-                    results.append(
-                        result
-                    )
-
-            except Exception as e:
-
-                print(
-
-                    jobs[future],
-                    "HATA:",
-                    e
-
-                )
-
-    # ========================================================
-    # SORT
-    # ========================================================
-
-    results.sort(
-
-        key=lambda x: (
-
-            x["score"],
-
-            x["technical_score"],
-
-            x["money_score"],
-
-            x["volume_score"]
-
-        ),
-
-        reverse=True
-
-    )
-
-    # ========================================================
-    # PRINT RESULTS
-    # ========================================================
-
-    print()
-
     print(
-        "========== EN İYİ ADAYLAR =========="
+        "========== FINAL =========="
     )
 
     if not results:
 
         print(
-            "❌ Uygun aday yok."
+            "❌ Final aday yok."
         )
 
     else:
 
-        for i, item in enumerate(
+        for i, x in enumerate(
 
-            results[:15],
+            results,
 
             1
 
@@ -3447,21 +3837,19 @@ def main():
             print(
 
                 f"{i}. "
-                f"{item['symbol']} | "
-                f"{item['score']}/100 | "
-                f"Tech "
-                f"{item['technical_score']} | "
-                f"Money "
-                f"{item['money_score']} | "
+                f"{x['symbol']} | "
+                f"{x['score']}/100 | "
                 f"RSI "
-                f"{item['rsi15']:.1f} | "
+                f"{x['rsi15']:.1f} | "
                 f"Vol "
-                f"{item['volume15']:.1f}x"
+                f"{x['volume15']:.1f}x | "
+                f"Para "
+                f"{x['flow_pct']:+.1f}%"
 
             )
 
     print(
-        "===================================="
+        "==========================="
     )
 
     # ========================================================
@@ -3493,8 +3881,12 @@ def main():
         state
     )
 
+    stats[
+        "alerts"
+    ] = len(alerts)
+
     # ========================================================
-    # SEND ALERTS
+    # TELEGRAM ALERTS
     # ========================================================
 
     for item in alerts:
@@ -3520,104 +3912,36 @@ def main():
     )
 
     # ========================================================
-    # CONSOLE
+    # SUMMARY
     # ========================================================
 
-    print()
+    summary = summary_text(
 
-    print(
-        "========== V15 RAPOR =========="
+        len(contracts),
+
+        results,
+
+        alerts,
+
+        duration
+
     )
-
-    print(
-        "15M OK:",
-        stats["kline15_ok"]
-    )
-
-    print(
-        "1H OK:",
-        stats["kline1h_ok"]
-    )
-
-    print(
-        "4H OK:",
-        stats["kline4h_ok"]
-    )
-
-    print(
-        "3 TF OK:",
-        stats["all_kline_ok"]
-    )
-
-    print(
-        "Kline hata:",
-        stats["kline_error"]
-    )
-
-    print(
-        "Para OK:",
-        stats["money_ok"]
-    )
-
-    print(
-        "Hacim OK:",
-        stats["volume_ok"]
-    )
-
-    print(
-        "Trend OK:",
-        stats["trend_ok"]
-    )
-
-    print(
-        "RSI OK:",
-        stats["rsi_ok"]
-    )
-
-    print(
-        "Yapı OK:",
-        stats["setup_ok"]
-    )
-
-    print(
-        "Final:",
-        len(results)
-    )
-
-    print(
-        "Alarm:",
-        len(alerts)
-    )
-
-    print(
-        "==============================="
-    )
-
-    # ========================================================
-    # TELEGRAM SUMMARY
-    # ========================================================
 
     telegram(
+        summary
+    )
 
-        summary_text(
+    print()
 
-            len(contracts),
-
-            results,
-
-            alerts,
-
-            duration
-
-        )
-
+    print(
+        summary
     )
 
     print()
 
     print(
 
-        f"✅ V15 TAMAMLANDI | "
+        f"✅ V16 TAMAMLANDI | "
         f"{duration:.1f} sn"
 
     )
