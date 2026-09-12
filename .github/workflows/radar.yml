@@ -1,15 +1,10 @@
-name: MEXC Pump Radar
+name: MEXC Pre-Pump Radar
 
 on:
-
-  # GitHub'dan elle çalıştır
   workflow_dispatch:
 
-  # Her 10 dakikada bir çalıştır
   schedule:
-
     - cron: "*/10 * * * *"
-
 
 jobs:
 
@@ -17,7 +12,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     steps:
 
@@ -26,69 +21,126 @@ jobs:
       # ======================================================
 
       - name: Repository indir
-
         uses: actions/checkout@v4
-
 
       # ======================================================
       # PYTHON
       # ======================================================
 
       - name: Python kurulumu
-
         uses: actions/setup-python@v5
-
         with:
-
           python-version: "3.11"
-
 
       # ======================================================
       # PAKETLER
       # ======================================================
 
       - name: Paketleri kur
-
         run: |
-
           python -m pip install --upgrade pip
+          pip install requests
 
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+      # ======================================================
+      # DOSYA KONTROL
+      # ======================================================
+
+      - name: Dosya kontrol
+        run: |
+          echo "========================================"
+          echo "REPOSITORY KONTROL"
+          echo "========================================"
+
+          echo "Bulunduğumuz klasör:"
+          pwd
+
+          echo ""
+          echo "Dosyalar:"
+          ls -la
+
+          echo ""
+          echo "main.py kontrol:"
+          if [ -f main.py ]; then
+            echo "✅ main.py bulundu"
           else
-            pip install requests
+            echo "❌ main.py BULUNAMADI"
+            exit 1
           fi
 
+          echo ""
+          echo "main.py satır sayısı:"
+          wc -l main.py
+
+      # ======================================================
+      # PYTHON SYNTAX
+      # ======================================================
+
+      - name: Python syntax kontrol
+        run: |
+          echo "========================================"
+          echo "PYTHON SYNTAX KONTROL"
+          echo "========================================"
+
+          python --version
+
+          python -m py_compile main.py
+
+          echo "✅ Python syntax OK"
 
       # ======================================================
       # RADAR
       # ======================================================
 
       - name: Radar çalıştır
-
         env:
-
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
 
-          python main.py
+          echo "========================================"
+          echo "🚀 RADAR BAŞLIYOR"
+          echo "========================================"
 
+          echo ""
+          echo "Python:"
+          python --version
+
+          echo ""
+          echo "main.py:"
+          wc -l main.py
+
+          echo ""
+          echo "========================================"
+          echo "MEXC PRE-PUMP RADAR V9"
+          echo "========================================"
+
+          python -u main.py
+
+          echo ""
+          echo "========================================"
+          echo "✅ RADAR BİTTİ"
+          echo "========================================"
 
       # ======================================================
       # SONUÇ
       # ======================================================
 
       - name: Tamamlandı
-
         if: success()
-
         run: |
+          echo "========================================"
+          echo "✅ MEXC RADAR BAŞARIYLA TAMAMLANDI"
+          echo "========================================"
 
-          echo "========================================="
+      # ======================================================
+      # HATA
+      # ======================================================
 
-          echo "🚀 MEXC PUMP RADAR TAMAMLANDI"
-
-          echo "========================================="
+      - name: Hata
+        if: failure()
+        run: |
+          echo "========================================"
+          echo "❌ RADAR HATA VERDİ"
+          echo "========================================"
+          echo "Yukarıdaki logları kontrol edin."
