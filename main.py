@@ -3,21 +3,37 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
 # ============================================================
-# 🚀 MEXC PUMP RADAR V2
+# 🚀 MEXC LSK PRE-PUMP RADAR V3
 #
 # AMAÇ:
-# LSK gibi büyük hareketleri başlamadan ÖNCE yakalamak
+# LSK gibi büyük hareketleri mümkün olduğunca erken yakalamak
 #
-# ANA MANTIK:
-# 4H SIKIŞMA
-# + HACİM GİRİŞİ
-# + DİRENÇ YAKINLIĞI
-# + HIGHER LOW
-# + MOMENTUM
-# + RSI TEYİDİ
+# SADECE:
+# ✅ MEXC USDT FUTURES
+# ✅ 15M
+# ✅ 1H
+# ✅ 4H
 #
-# SADECE MEXC USDT FUTURES
+# KULLANILANLAR:
+# ✅ 4H SIKIŞMA
+# ✅ HACİM GİRİŞİ
+# ✅ DİRENÇ
+# ✅ HIGHER LOW
+# ✅ MOMENTUM
+# ✅ RSI TEYİDİ
+#
+# ÖNEMLİ:
+# ❌ Otomatik işlem açmaz
+# ❌ Futures emir göndermez
+# ❌ Spot taramaz
+# ❌ Stock taramaz
+# ============================================================
+
+
+# ============================================================
+# AYARLAR
 # ============================================================
 
 BASE = "https://api.mexc.com"
@@ -25,15 +41,18 @@ BASE = "https://api.mexc.com"
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SCAN_SECONDS = 60
-MAX_WORKERS = 12
+MAX_WORKERS = 8
 
-MIN_SCORE = 70
+MIN_SCORE = 72
+
 MAX_ALERTS = 6
 
 COOLDOWN_MINUTES = 45
 
-last_alert = {}
+
+# ============================================================
+# SESSION
+# ============================================================
 
 session = requests.Session()
 
@@ -44,26 +63,16 @@ session.headers.update({
 
 
 # ============================================================
-# HTTP
+# İSTATİSTİK
 # ============================================================
 
-def get(url, params=None):
-
-    try:
-
-        r = session.get(
-            url,
-            params=params,
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            return None
-
-        return r.json()
-
-    except Exception:
-        return None
+stats = {
+    "total": 0,
+    "data_ok": 0,
+    "filtered": 0,
+    "errors": 0,
+    "candidates": 0
+}
 
 
 # ============================================================
@@ -72,9 +81,13 @@ def get(url, params=None):
 
 def telegram(message):
 
-    if not TOKEN or not CHAT_ID:
-        print(message)
-        return
+    if not TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN bulunamadı")
+        return False
+
+    if not CHAT_ID:
+        print("❌ TELEGRAM_CHAT_ID bulunamadı")
+        return False
 
     url = (
         f"https://api.telegram.org/"
@@ -89,49 +102,145 @@ def telegram(message):
     }
 
     try:
-        session.post(
+
+        response = session.post(
             url,
             json=payload,
-            timeout=10
+            timeout=15
         )
 
+        if response.status_code != 200:
+
+            print(
+                "❌ Telegram hata:",
+                response.status_code,
+                response.text[:300]
+            )
+
+            return False
+
+        return True
+
     except Exception as e:
-        print("Telegram:", e)
+
+        print(
+            "❌ Telegram bağlantı hatası:",
+            repr(e)
+        )
+
+        return False
 
 
 # ============================================================
-# FUTURES SYMBOLLER
+# MEXC GET
+# ============================================================
+
+def mexc_get(path, params=None):
+
+    url = BASE + path
+
+    try:
+
+        response = session.get(
+            url,
+            params=params,
+            timeout=12
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "API HTTP:",
+                response.status_code,
+                path
+            )
+
+            return None
+
+        data = response.json()
+
+        return data
+
+    except Exception as e:
+
+        print(
+            "API ERROR:",
+            path,
+            repr(e)
+        )
+
+        return None
+
+
+# ============================================================
+# FUTURES SEMBOLLERİ
 # ============================================================
 
 def get_symbols():
 
-    data = get(
-        f"{BASE}/api/v1/contract/detail"
+    print("")
+    print("=========================================")
+    print("📡 MEXC FUTURES SEMBOLLERİ ALINIYOR")
+    print("=========================================")
+
+    data = mexc_get(
+        "/api/v1/contract/detail"
     )
 
     if not data:
+
+        print("❌ Futures listesi alınamadı")
+
+        return []
+
+    rows = data.get("data", [])
+
+    if not isinstance(rows, list):
+
+        print(
+            "❌ Beklenmeyen Futures response"
+        )
+
         return []
 
     symbols = []
 
-    for item in data.get("data", []):
+    for item in rows:
 
-        symbol = item.get("symbol", "")
+        symbol = item.get(
+            "symbol",
+            ""
+        )
 
+        if not symbol:
+            continue
+
+        # Sadece USDT futures
         if not symbol.endswith("_USDT"):
             continue
 
+        # State kontrolü
         state = item.get("state")
 
         try:
 
-            if state is not None and int(state) != 0:
-                continue
+            if state is not None:
 
-        except:
+                if int(state) != 0:
+                    continue
+
+        except Exception:
             pass
 
         symbols.append(symbol)
+
+    symbols = sorted(
+        list(set(symbols))
+    )
+
+    print(
+        f"✅ Futures sembol sayısı: {len(symbols)}"
+    )
 
     return symbols
 
@@ -140,10 +249,14 @@ def get_symbols():
 # KLINE
 # ============================================================
 
-def klines(symbol, interval, limit=120):
+def get_klines(
+    symbol,
+    interval,
+    limit=100
+):
 
-    data = get(
-        f"{BASE}/api/v1/contract/kline/{symbol}",
+    data = mexc_get(
+        f"/api/v1/contract/kline/{symbol}",
         {
             "interval": interval,
             "limit": limit
@@ -151,35 +264,60 @@ def klines(symbol, interval, limit=120):
     )
 
     if not data:
+
         return []
 
-    d = data.get("data")
+    rows = data.get("data")
 
-    if not d:
+    if not rows:
+
         return []
 
+    result = []
+
     # --------------------------------------------------------
-    # DICT FORMAT
+    # MEXC DICT FORMAT
     # --------------------------------------------------------
 
-    if isinstance(d, dict):
+    if isinstance(rows, dict):
 
-        t = d.get("time", [])
-        o = d.get("open", [])
-        h = d.get("high", [])
-        l = d.get("low", [])
-        c = d.get("close", [])
-        v = d.get("vol", [])
+        times = rows.get(
+            "time",
+            []
+        )
 
-        result = []
+        opens = rows.get(
+            "open",
+            []
+        )
+
+        highs = rows.get(
+            "high",
+            []
+        )
+
+        lows = rows.get(
+            "low",
+            []
+        )
+
+        closes = rows.get(
+            "close",
+            []
+        )
+
+        volumes = rows.get(
+            "vol",
+            []
+        )
 
         n = min(
-            len(t),
-            len(o),
-            len(h),
-            len(l),
-            len(c),
-            len(v)
+            len(times),
+            len(opens),
+            len(highs),
+            len(lows),
+            len(closes),
+            len(volumes)
         )
 
         for i in range(n):
@@ -187,82 +325,133 @@ def klines(symbol, interval, limit=120):
             try:
 
                 result.append({
-                    "time": float(t[i]),
-                    "open": float(o[i]),
-                    "high": float(h[i]),
-                    "low": float(l[i]),
-                    "close": float(c[i]),
-                    "volume": float(v[i])
+
+                    "time": float(
+                        times[i]
+                    ),
+
+                    "open": float(
+                        opens[i]
+                    ),
+
+                    "high": float(
+                        highs[i]
+                    ),
+
+                    "low": float(
+                        lows[i]
+                    ),
+
+                    "close": float(
+                        closes[i]
+                    ),
+
+                    "volume": float(
+                        volumes[i]
+                    )
                 })
 
-            except:
-                pass
-
-        return result
+            except Exception:
+                continue
 
     # --------------------------------------------------------
     # LIST FORMAT
     # --------------------------------------------------------
 
-    if isinstance(d, list):
+    elif isinstance(rows, list):
 
-        result = []
-
-        for x in d:
+        for row in rows:
 
             try:
 
-                if len(x) < 6:
+                if len(row) < 6:
                     continue
 
                 result.append({
-                    "time": float(x[0]),
-                    "open": float(x[1]),
-                    "high": float(x[2]),
-                    "low": float(x[3]),
-                    "close": float(x[4]),
-                    "volume": float(x[5])
+
+                    "time": float(
+                        row[0]
+                    ),
+
+                    "open": float(
+                        row[1]
+                    ),
+
+                    "high": float(
+                        row[2]
+                    ),
+
+                    "low": float(
+                        row[3]
+                    ),
+
+                    "close": float(
+                        row[4]
+                    ),
+
+                    "volume": float(
+                        row[5]
+                    )
                 })
 
-            except:
-                pass
+            except Exception:
+                continue
 
-        return result
+    # MEXC verisi zaman sıralı olsun
+    result.sort(
+        key=lambda x: x["time"]
+    )
 
-    return []
+    return result
 
 
 # ============================================================
 # RSI
 # ============================================================
 
-def RSI(values, period=14):
+def calculate_rsi(
+    values,
+    period=14
+):
 
     if len(values) < period + 2:
+
         return None
 
     gains = []
     losses = []
 
-    for i in range(1, len(values)):
+    for i in range(
+        1,
+        len(values)
+    ):
 
-        diff = values[i] - values[i - 1]
+        diff = (
+            values[i]
+            - values[i - 1]
+        )
 
-        if diff > 0:
+        if diff >= 0:
+
             gains.append(diff)
             losses.append(0)
 
         else:
+
             gains.append(0)
-            losses.append(abs(diff))
+            losses.append(
+                abs(diff)
+            )
 
-    avg_gain = sum(
-        gains[:period]
-    ) / period
+    avg_gain = (
+        sum(gains[:period])
+        / period
+    )
 
-    avg_loss = sum(
-        losses[:period]
-    ) / period
+    avg_loss = (
+        sum(losses[:period])
+        / period
+    )
 
     for i in range(
         period,
@@ -270,22 +459,36 @@ def RSI(values, period=14):
     ):
 
         avg_gain = (
-            avg_gain * (period - 1)
+            (
+                avg_gain
+                * (period - 1)
+            )
             + gains[i]
         ) / period
 
         avg_loss = (
-            avg_loss * (period - 1)
+            (
+                avg_loss
+                * (period - 1)
+            )
             + losses[i]
         ) / period
 
     if avg_loss == 0:
-        return 100
 
-    rs = avg_gain / avg_loss
+        return 100.0
 
-    return 100 - (
-        100 / (1 + rs)
+    rs = (
+        avg_gain
+        / avg_loss
+    )
+
+    return (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
     )
 
 
@@ -293,99 +496,140 @@ def RSI(values, period=14):
 # SMA
 # ============================================================
 
-def SMA(values, period):
+def sma(
+    values,
+    period
+):
 
     if len(values) < period:
+
         return None
 
-    return sum(
-        values[-period:]
-    ) / period
+    return (
+        sum(values[-period:])
+        / period
+    )
 
 
 # ============================================================
-# HACİM ORANI
+# DEĞİŞİM %
 # ============================================================
 
-def volume_ratio(candles, lookback=20):
-
-    if len(candles) < lookback + 1:
-        return 0
-
-    current = candles[-1]["volume"]
-
-    old = [
-        x["volume"]
-        for x in candles[
-            -lookback-1:-1
-        ]
-    ]
-
-    avg = sum(old) / len(old)
-
-    if avg <= 0:
-        return 0
-
-    return current / avg
-
-
-# ============================================================
-# DEĞİŞİM
-# ============================================================
-
-def change(candles, bars):
+def percent_change(
+    candles,
+    bars
+):
 
     if len(candles) <= bars:
-        return 0
 
-    old = candles[-bars-1]["close"]
+        return 0.0
 
-    now = candles[-1]["close"]
+    old = candles[
+        -bars - 1
+    ]["close"]
+
+    new = candles[-1]["close"]
 
     if old <= 0:
-        return 0
+
+        return 0.0
 
     return (
-        (now - old)
+        (new - old)
         / old
     ) * 100
 
 
 # ============================================================
-# 4H SIKIŞMA
+# HACİM RASYOSU
 # ============================================================
 
-def compression(candles):
+def volume_ratio(
+    candles,
+    lookback=20
+):
+
+    if len(candles) < (
+        lookback + 1
+    ):
+
+        return 0.0
+
+    current = candles[
+        -1
+    ]["volume"]
+
+    previous = [
+        x["volume"]
+        for x in candles[
+            -lookback - 1:
+            -1
+        ]
+    ]
+
+    if not previous:
+
+        return 0.0
+
+    average = (
+        sum(previous)
+        / len(previous)
+    )
+
+    if average <= 0:
+
+        return 0.0
+
+    return (
+        current
+        / average
+    )
+
+
+# ============================================================
+# SIKIŞMA
+# ============================================================
+
+def get_compression(
+    candles
+):
 
     if len(candles) < 25:
-        return False, 999
 
-    recent = candles[-20:]
+        return False, 999.0
 
-    high = max(
+    recent = candles[
+        -20:
+    ]
+
+    highest = max(
         x["high"]
         for x in recent
     )
 
-    low = min(
+    lowest = min(
         x["low"]
         for x in recent
     )
 
-    if low <= 0:
-        return False, 999
+    if lowest <= 0:
+
+        return False, 999.0
 
     width = (
-        (high - low)
-        / low
+        (
+            highest
+            - lowest
+        )
+        / lowest
     ) * 100
 
-    # LSK benzeri sıkışma
     if width <= 15:
+
         return True, width
 
-    # Biraz gevşek
     if width <= 22:
+
         return True, width
 
     return False, width
@@ -395,22 +639,30 @@ def compression(candles):
 # HIGHER LOW
 # ============================================================
 
-def higher_low(candles):
+def has_higher_low(
+    candles
+):
 
     if len(candles) < 12:
+
         return False
 
-    left = candles[-12:-6]
-    right = candles[-6:]
+    first = candles[
+        -12:-6
+    ]
+
+    second = candles[
+        -6:
+    ]
 
     low1 = min(
         x["low"]
-        for x in left
+        for x in first
     )
 
     low2 = min(
         x["low"]
-        for x in right
+        for x in second
     )
 
     return low2 > low1
@@ -420,25 +672,36 @@ def higher_low(candles):
 # DİRENÇ
 # ============================================================
 
-def resistance_info(candles):
+def resistance_distance(
+    candles
+):
 
     if len(candles) < 25:
-        return None, 999
 
-    previous = candles[-21:-1]
+        return None, 999.0
+
+    previous = candles[
+        -21:-1
+    ]
 
     resistance = max(
         x["high"]
         for x in previous
     )
 
-    price = candles[-1]["close"]
+    price = candles[
+        -1
+    ]["close"]
 
     if resistance <= 0:
-        return resistance, 999
+
+        return None, 999.0
 
     distance = (
-        (resistance - price)
+        (
+            resistance
+            - price
+        )
         / resistance
     ) * 100
 
@@ -446,179 +709,223 @@ def resistance_info(candles):
 
 
 # ============================================================
-# MOMENTUM
+# ANALİZ
 # ============================================================
 
-def momentum_score(c15, c1):
-
-    m15_now = change(c15, 4)
-    m15_old = change(c15[:-4], 4)
-
-    m1_now = change(c1, 4)
-    m1_old = change(c1[:-4], 4)
-
-    score = 0
-    reasons = []
-
-    if m15_now > m15_old:
-
-        score += 8
-
-        reasons.append(
-            "15M momentum↑"
-        )
-
-    if m1_now > m1_old:
-
-        score += 7
-
-        reasons.append(
-            "1H momentum↑"
-        )
-
-    return score, reasons
-
-
-# ============================================================
-# ANA ANALİZ
-# ============================================================
-
-def analyze(symbol):
+def analyze(
+    symbol
+):
 
     try:
 
-        c15 = klines(
+        c15 = get_klines(
             symbol,
             "Min15",
-            120
+            100
         )
 
-        c1 = klines(
+        c1h = get_klines(
             symbol,
             "Hour1",
-            120
+            100
         )
 
-        c4 = klines(
+        c4h = get_klines(
             symbol,
             "Hour4",
-            120
+            100
         )
 
         if (
-            len(c15) < 60
-            or len(c1) < 60
-            or len(c4) < 60
+            len(c15) < 50
+            or len(c1h) < 50
+            or len(c4h) < 50
         ):
+
             return None
+
+        stats["data_ok"] += 1
 
         close15 = [
             x["close"]
             for x in c15
         ]
 
-        close1 = [
+        close1h = [
             x["close"]
-            for x in c1
+            for x in c1h
         ]
 
-        close4 = [
+        close4h = [
             x["close"]
-            for x in c4
+            for x in c4h
         ]
 
         price = close15[-1]
 
-        # ====================================================
+        # ----------------------------------------------------
         # RSI
-        # ====================================================
+        # ----------------------------------------------------
 
-        r15 = RSI(close15)
-        r1 = RSI(close1)
-        r4 = RSI(close4)
+        rsi15 = calculate_rsi(
+            close15
+        )
 
-        if None in (r15, r1, r4):
+        rsi1h = calculate_rsi(
+            close1h
+        )
+
+        rsi4h = calculate_rsi(
+            close4h
+        )
+
+        if None in (
+            rsi15,
+            rsi1h,
+            rsi4h
+        ):
+
             return None
 
-        # ====================================================
+        # ----------------------------------------------------
         # HACİM
+        # ----------------------------------------------------
+
+        vol15 = volume_ratio(
+            c15
+        )
+
+        vol1h = volume_ratio(
+            c1h
+        )
+
+        vol4h = volume_ratio(
+            c4h
+        )
+
+        # ----------------------------------------------------
+        # FİYAT HAREKETİ
+        # ----------------------------------------------------
+
+        move15 = percent_change(
+            c15,
+            4
+        )
+
+        move1h = percent_change(
+            c1h,
+            4
+        )
+
+        move4h = percent_change(
+            c4h,
+            4
+        )
+
+        move24h = percent_change(
+            c15,
+            96
+        )
+
+        # ====================================================
+        # GEÇ KALMA FİLTRESİ
         # ====================================================
 
-        v15 = volume_ratio(c15)
-        v1 = volume_ratio(c1)
-        v4 = volume_ratio(c4)
+        if move24h >= 30:
 
-        # ====================================================
-        # HAREKET
-        # ====================================================
+            stats["filtered"] += 1
 
-        p15 = change(c15, 4)
-        p1 = change(c1, 4)
-        p4 = change(c4, 4)
-        p24 = change(c15, 96)
-
-        # ====================================================
-        # GEÇ KALANLARI ELE
-        # ====================================================
-
-        if p24 >= 30:
             return None
 
-        if p4 >= 20:
+        if move4h >= 20:
+
+            stats["filtered"] += 1
+
             return None
 
-        if p1 >= 15:
+        if move1h >= 15:
+
+            stats["filtered"] += 1
+
             return None
 
-        if r15 >= 76:
+        if move15 >= 12:
+
+            stats["filtered"] += 1
+
+            return None
+
+        if rsi15 >= 76:
+
+            stats["filtered"] += 1
+
             return None
 
         # ====================================================
         # SIKIŞMA
         # ====================================================
 
-        compressed, width = compression(c4)
+        compressed, width = (
+            get_compression(c4h)
+        )
 
         # ====================================================
         # DİRENÇ
         # ====================================================
 
-        resistance, resistance_distance = (
-            resistance_info(c15)
+        resistance, distance = (
+            resistance_distance(c15)
         )
 
         # ====================================================
         # HIGHER LOW
         # ====================================================
 
-        hl4 = higher_low(c4)
-        hl1 = higher_low(c1)
+        hl4 = has_higher_low(
+            c4h
+        )
+
+        hl1 = has_higher_low(
+            c1h
+        )
 
         # ====================================================
         # MA
         # ====================================================
 
-        ma5 = SMA(close4, 5)
-        ma10 = SMA(close4, 10)
-        ma30 = SMA(close4, 30)
+        ma5 = sma(
+            close4h,
+            5
+        )
+
+        ma10 = sma(
+            close4h,
+            10
+        )
+
+        ma30 = sma(
+            close4h,
+            30
+        )
 
         if None in (
             ma5,
             ma10,
             ma30
         ):
+
             return None
 
         # ====================================================
-        # SKOR
+        # SCORE
         # ====================================================
 
         score = 0
+
         reasons = []
 
         # ----------------------------------------------------
-        # 1 — SIKIŞMA
-        # MAX 20
+        # 4H SIKIŞMA = 20
         # ----------------------------------------------------
 
         if compressed:
@@ -640,42 +947,46 @@ def analyze(symbol):
                 )
 
         # ----------------------------------------------------
-        # 2 — HACİM
-        # MAX 20
+        # HACİM = 20
         # ----------------------------------------------------
 
-        if v15 >= 2.0:
+        if vol15 >= 2.0:
 
             score += 10
 
             reasons.append(
-                f"15M hacim {v15:.1f}x"
+                f"15M hacim {vol15:.1f}x"
             )
 
-        elif v15 >= 1.5:
+        elif vol15 >= 1.5:
 
             score += 5
 
-        if v1 >= 1.8:
+            reasons.append(
+                f"15M hacim {vol15:.1f}x"
+            )
+
+        if vol1h >= 1.8:
 
             score += 10
 
             reasons.append(
-                f"1H hacim {v1:.1f}x"
+                f"1H hacim {vol1h:.1f}x"
             )
 
-        elif v1 >= 1.4:
+        elif vol1h >= 1.4:
 
             score += 5
 
+            reasons.append(
+                f"1H hacim {vol1h:.1f}x"
+            )
+
         # ----------------------------------------------------
-        # 3 — DİRENÇ
-        # MAX 20
+        # DİRENÇ = 20
         # ----------------------------------------------------
 
-        if (
-            0 <= resistance_distance <= 2
-        ):
+        if 0 <= distance <= 2:
 
             score += 20
 
@@ -683,9 +994,7 @@ def analyze(symbol):
                 "Direnç çok yakın"
             )
 
-        elif (
-            2 < resistance_distance <= 5
-        ):
+        elif 2 < distance <= 5:
 
             score += 15
 
@@ -693,9 +1002,7 @@ def analyze(symbol):
                 "Direnç yakın"
             )
 
-        elif (
-            5 < resistance_distance <= 10
-        ):
+        elif 5 < distance <= 10:
 
             score += 8
 
@@ -704,8 +1011,7 @@ def analyze(symbol):
             )
 
         # ----------------------------------------------------
-        # 4 — HIGHER LOW
-        # MAX 15
+        # HIGHER LOW = 15
         # ----------------------------------------------------
 
         if hl4:
@@ -725,29 +1031,45 @@ def analyze(symbol):
             )
 
         # ----------------------------------------------------
-        # 5 — MOMENTUM
-        # MAX 15
+        # MOMENTUM = 15
         # ----------------------------------------------------
 
-        ms, mr = momentum_score(
-            c15,
-            c1
+        old15 = percent_change(
+            c15[:-4],
+            4
         )
 
-        score += ms
+        old1h = percent_change(
+            c1h[:-4],
+            4
+        )
 
-        reasons.extend(mr)
+        if move15 > old15:
+
+            score += 8
+
+            reasons.append(
+                "15M momentum artıyor"
+            )
+
+        if move1h > old1h:
+
+            score += 7
+
+            reasons.append(
+                "1H momentum artıyor"
+            )
 
         # ----------------------------------------------------
-        # 6 — RSI
-        # MAX 10
+        # RSI = SADECE 10
         # ----------------------------------------------------
 
-        # RSI sadece teyit
         if (
-            52 <= r15 <= 68
-            and 50 <= r1 <= 68
-            and r4 >= 45
+            52 <= rsi15 <= 68
+            and
+            50 <= rsi1h <= 68
+            and
+            rsi4h >= 45
         ):
 
             score += 10
@@ -757,17 +1079,18 @@ def analyze(symbol):
             )
 
         elif (
-            50 <= r15 <= 70
-            and 48 <= r1 <= 70
+            50 <= rsi15 <= 70
+            and
+            48 <= rsi1h <= 70
         ):
 
             score += 5
 
         # ====================================================
-        # KRİTİK FİLTRELER
+        # KRİTİK KONTROLLER
         # ====================================================
 
-        # Sıkışma yoksa 75 üstü olamaz
+        # Sıkışma yoksa güçlü sinyal olmasın
         if not compressed:
 
             score = min(
@@ -775,50 +1098,65 @@ def analyze(symbol):
                 69
             )
 
-        # Hacim yoksa sinyal yok
+        # Hacim kesinlikle gerekli
         if (
-            v15 < 1.3
-            and v1 < 1.3
+            vol15 < 1.3
+            and
+            vol1h < 1.3
         ):
 
             return None
 
-        # RSI aşırı düşükse
-        if r15 < 42:
+        # Çok düşük RSI
+        if rsi15 < 42:
+
             return None
 
-        # Fiyat zaten çok hızlandıysa
-        if p15 > 12:
+        # MA yapısı tamamen kötü ise
+        if (
+            price < ma30
+            and
+            ma5 < ma10
+        ):
+
             return None
 
         # ====================================================
-        # MİN SKOR
+        # SCORE
         # ====================================================
 
         if score < MIN_SCORE:
+
             return None
 
         # ====================================================
         # STAGE
         # ====================================================
 
-        if score >= 88:
+        if score >= 90:
 
-            stage = "🔥 ÇOK GÜÇLÜ ERKEN"
+            stage = (
+                "🔥 ÇOK GÜÇLÜ ERKEN"
+            )
 
-        elif score >= 80:
+        elif score >= 82:
 
-            stage = "🚀 GÜÇLÜ ERKEN"
+            stage = (
+                "🚀 GÜÇLÜ ERKEN"
+            )
 
         else:
 
-            stage = "⚡ ERKEN ADAY"
+            stage = (
+                "⚡ ERKEN ADAY"
+            )
 
         # ====================================================
         # GİRİŞ
         # ====================================================
 
         entry_low = price * 0.997
+
         entry_high = price * 1.008
 
         # ====================================================
@@ -826,7 +1164,9 @@ def analyze(symbol):
         # ====================================================
 
         tp1 = price * 1.05
+
         tp2 = price * 1.10
+
         tp3 = price * 1.18
 
         # ====================================================
@@ -845,22 +1185,23 @@ def analyze(symbol):
 
             "price": price,
 
-            "r15": r15,
-            "r1": r1,
-            "r4": r4,
+            "rsi15": rsi15,
+            "rsi1h": rsi1h,
+            "rsi4h": rsi4h,
 
-            "v15": v15,
-            "v1": v1,
+            "vol15": vol15,
+            "vol1h": vol1h,
+            "vol4h": vol4h,
 
-            "p15": p15,
-            "p1": p1,
-            "p4": p4,
-            "p24": p24,
+            "move15": move15,
+            "move1h": move1h,
+            "move4h": move4h,
+            "move24h": move24h,
 
             "width": width,
 
             "resistance": resistance,
-            "resistance_distance": resistance_distance,
+            "distance": distance,
 
             "entry_low": entry_low,
             "entry_high": entry_high,
@@ -876,82 +1217,56 @@ def analyze(symbol):
 
     except Exception as e:
 
+        stats["errors"] += 1
+
         return None
 
 
 # ============================================================
-# COOLDOWN
+# ALERT
 # ============================================================
 
-def can_alert(symbol):
-
-    now = time.time()
-
-    old = last_alert.get(
-        symbol,
-        0
-    )
-
-    return (
-        now - old
-        >= COOLDOWN_MINUTES * 60
-    )
-
-
-# ============================================================
-# TELEGRAM ALERT
-# ============================================================
-
-def send_alert(x):
-
-    symbol = x["symbol"]
-
-    if not can_alert(symbol):
-        return
-
-    last_alert[
-        symbol
-    ] = time.time()
+def send_alert(
+    x
+):
 
     reason_text = "\n".join(
-        [
-            f"• {r}"
-            for r in x["reasons"][:7]
-        ]
+        f"• {r}"
+        for r in x["reasons"][:7]
     )
 
     message = f"""
 <b>🚀 LSK-TİPİ ERKEN PUMP</b>
 
-<b>{symbol}</b>
+<b>{x["symbol"]}</b>
 
 {x["stage"]}
 
 ⭐ GÜÇ: <b>{x["score"]}/100</b>
 
-💰 Fiyat:
+💰 FİYAT
 <b>{x["price"]:.8g}</b>
 
 📊 RSI
-15M: {x["r15"]:.1f}
-1H: {x["r1"]:.1f}
-4H: {x["r4"]:.1f}
+15M: {x["rsi15"]:.1f}
+1H: {x["rsi1h"]:.1f}
+4H: {x["rsi4h"]:.1f}
 
 📈 HACİM
-15M: <b>{x["v15"]:.1f}x</b>
-1H: <b>{x["v1"]:.1f}x</b>
+15M: <b>{x["vol15"]:.1f}x</b>
+1H: <b>{x["vol1h"]:.1f}x</b>
 
 📉 HAREKET
-15M: {x["p15"]:+.1f}%
-1H: {x["p1"]:+.1f}%
-4H: {x["p4"]:+.1f}%
-24H: {x["p24"]:+.1f}%
+15M: {x["move15"]:+.1f}%
+1H: {x["move1h"]:+.1f}%
+4H: {x["move4h"]:+.1f}%
+24H: {x["move24h"]:+.1f}%
 
 📦 4H SIKIŞMA
 {x["width"]:.1f}%
 
-🎯 DİRENÇ MESAFESİ
-{x["resistance_distance"]:.1f}%
+🎯 DİRENÇ
+{x["distance"]:.1f}% uzaklıkta
 
 🎯 GİRİŞ
 {x["entry_low"]:.8g}
@@ -970,80 +1285,176 @@ def send_alert(x):
 🛑 STOP
 {x["stop"]:.8g}
 
-<b>🔎 NEDEN?</b>
+<b>🔎 YAPI</b>
 {reason_text}
 
 ⚠️ Otomatik teknik taramadır.
 Pump garantisi değildir.
 """
 
-    telegram(message)
+    telegram(
+        message
+    )
 
 
 # ============================================================
-# SCAN
+# TEK TARAMA
 # ============================================================
 
 def scan():
+
+    print("")
+    print("=========================================")
+    print("🔍 MEXC PUMP RADAR BAŞLADI")
+    print("=========================================")
 
     symbols = get_symbols()
 
     if not symbols:
 
-        print(
-            "❌ Futures listesi alınamadı."
+        raise RuntimeError(
+            "Futures sembolleri alınamadı."
         )
 
-        return
-
-    print(
-        f"🔎 {len(symbols)} Futures taranıyor..."
+    stats["total"] = len(
+        symbols
     )
 
     results = []
+
+    print("")
+    print(
+        f"🔎 {len(symbols)} Futures coin taranıyor..."
+    )
+
+    start = time.time()
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        jobs = {
+        jobs = [
             executor.submit(
                 analyze,
                 symbol
-            ): symbol
-
+            )
             for symbol in symbols
-        }
+        ]
 
-        for job in as_completed(jobs):
+        for job in as_completed(
+            jobs
+        ):
 
             try:
 
                 result = job.result()
 
                 if result:
-                    results.append(result)
 
-            except:
-                pass
+                    results.append(
+                        result
+                    )
+
+            except Exception:
+
+                stats["errors"] += 1
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    print(
-        f"🔥 Uygun aday: {len(results)}"
+    stats["candidates"] = len(
+        results
     )
 
-    for x in results[:MAX_ALERTS]:
+    elapsed = (
+        time.time()
+        - start
+    )
+
+    print("")
+    print("=========================================")
+    print("📊 TARAMA TAMAMLANDI")
+    print("=========================================")
+
+    print(
+        f"Toplam Futures : {stats['total']}"
+    )
+
+    print(
+        f"Verisi uygun   : {stats['data_ok']}"
+    )
+
+    print(
+        f"Filtrelenen    : {stats['filtered']}"
+    )
+
+    print(
+        f"Hata           : {stats['errors']}"
+    )
+
+    print(
+        f"Aday           : {stats['candidates']}"
+    )
+
+    print(
+        f"Süre           : {elapsed:.1f} saniye"
+    )
+
+    print(
+        "========================================="
+    )
+
+    if not results:
 
         print(
-            x["symbol"],
-            x["score"]
+            "⚪ Bu taramada güçlü LSK tipi aday yok."
         )
 
-        send_alert(x)
+        telegram(
+            "⚪ <b>PUMP RADAR</b>\n\n"
+            "Bu taramada LSK tipi "
+            "güçlü erken pump adayı bulunamadı."
+        )
+
+        return
+
+    print("")
+    print(
+        "🔥 EN GÜÇLÜ ADAYLAR"
+    )
+
+    for i, x in enumerate(
+        results[:MAX_ALERTS],
+        1
+    ):
+
+        print(
+            f"{i}. "
+            f"{x['symbol']} "
+            f"{x['score']}/100 "
+            f"RSI15={x['rsi15']:.1f} "
+            f"VOL15={x['vol15']:.1f}x"
+        )
+
+    print("")
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
+    for x in results[
+        :MAX_ALERTS
+    ]:
+
+        send_alert(
+            x
+        )
+
+    print(
+        "📨 Telegram bildirimleri gönderildi."
+    )
 
 
 # ============================================================
@@ -1052,50 +1463,51 @@ def scan():
 
 def main():
 
-    print("""
-=========================================
-🚀 MEXC PUMP RADAR V2
-=========================================
+    print("")
+    print("=========================================")
+    print("🚀 MEXC LSK PRE-PUMP RADAR V3")
+    print("=========================================")
+    print("")
 
-LSK ÖNCESİ HAREKET RADARI
-
-4H SIKIŞMA
-+
-HACİM GİRİŞİ
-+
-DİRENÇ
-+
-HIGHER LOW
-+
-MOMENTUM
-+
-RSI TEYİDİ
-
-SADECE USDT FUTURES
-=========================================
-""")
-
-    while True:
-
-        try:
-
-            scan()
-
-        except Exception as e:
-
-            print(
-                "MAIN ERROR:",
-                e
-            )
+    if not TOKEN:
 
         print(
-            f"⏳ {SCAN_SECONDS} saniye..."
+            "❌ TELEGRAM_BOT_TOKEN YOK"
         )
 
-        time.sleep(
-            SCAN_SECONDS
+    else:
+
+        print(
+            "✅ TELEGRAM_BOT_TOKEN bulundu"
         )
 
+    if not CHAT_ID:
+
+        print(
+            "❌ TELEGRAM_CHAT_ID YOK"
+        )
+
+    else:
+
+        print(
+            "✅ TELEGRAM_CHAT_ID bulundu"
+        )
+
+    scan()
+
+    print("")
+    print(
+        "✅ RADAR TAMAMLANDI"
+    )
+    print(
+        "ℹ️ Program normal şekilde kapatılıyor."
+    )
+
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
+
     main()
