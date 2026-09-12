@@ -10,11 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ============================================================
 # 🚀 MEXC PRE-PUMP RADAR V12.2
 #
-# PARA AKIŞI
-# GİRİŞ BÖLGESİ
-# KIRILIM GİRİŞİ
-# STOP
-# TP1 / TP2 / TP3
+# 💰 PARA AKIŞI
+# 📍 GİRİŞ BÖLGESİ
+# 🚀 KIRILIM GİRİŞİ
+# 🛑 STOP
+# 🎯 TP1 / TP2 / TP3
 #
 # SADECE MEXC USDT FUTURES
 # OTOMATİK İŞLEM AÇMAZ
@@ -33,26 +33,27 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 MAX_CANDIDATES = 100
 MAX_WORKERS = 8
-
 DEALS_LIMIT = 100
 
 MIN_24H_AMOUNT = 100_000
 
-# Önceki $25K çok sertti.
+# %100 alış baskısı olup sadece $700-$2K gibi küçük
+# akışları sinyal yapmamak için.
 MIN_OPEN_NOTIONAL = 15_000
 
 # Açılış akışı / 24H hacim
 MIN_OPEN_RATIO = 0.0005
 
-# Para skoru
 MIN_MONEY_SCORE = 14
-
-# Genel skor
 MIN_FINAL_SCORE = 52
 
 STATE_FILE = "signal_state_v12_2.json"
 STATE_EXPIRY = 3600
 
+
+# ============================================================
+# TIMEFRAME
+# ============================================================
 
 TIMEFRAMES = {
     "15M": "Min15",
@@ -103,12 +104,11 @@ NON_CRYPTO = {
 session = requests.Session()
 
 rate_lock = threading.Lock()
-
 last_request = 0.0
 
 
 # ============================================================
-# GENEL API
+# API
 # ============================================================
 
 def api_get(url, params=None):
@@ -120,8 +120,7 @@ def api_get(url, params=None):
         with rate_lock:
 
             wait = 0.11 - (
-                time.time()
-                - last_request
+                time.time() - last_request
             )
 
             if wait > 0:
@@ -129,7 +128,7 @@ def api_get(url, params=None):
 
             last_request = time.time()
 
-        response = session.get(
+        r = session.get(
             url,
             params=params,
             timeout=20,
@@ -139,9 +138,9 @@ def api_get(url, params=None):
             }
         )
 
-        response.raise_for_status()
+        r.raise_for_status()
 
-        return response.json()
+        return r.json()
 
     except Exception as e:
 
@@ -227,7 +226,6 @@ def calculate_rsi(
 ):
 
     if len(values) < period + 1:
-
         return 50.0
 
     gains = []
@@ -281,7 +279,6 @@ def calculate_rsi(
         ) / period
 
     if loss == 0:
-
         return 100.0
 
     rs = gain / loss
@@ -302,7 +299,6 @@ def get_contracts():
     )
 
     if not data:
-
         return {}, []
 
     rows = data.get(
@@ -314,7 +310,6 @@ def get_contracts():
         rows,
         list
     ):
-
         return {}, []
 
     contracts = {}
@@ -331,7 +326,6 @@ def get_contracts():
         if not symbol.endswith(
             "_USDT"
         ):
-
             continue
 
         base_coin = str(
@@ -341,15 +335,12 @@ def get_contracts():
             )
         ).upper()
 
-        clean_symbol = (
-            symbol[:-5]
-        )
+        clean = symbol[:-5]
 
         if (
             base_coin in NON_CRYPTO
-            or clean_symbol in NON_CRYPTO
+            or clean in NON_CRYPTO
         ):
-
             continue
 
         contract_size = num(
@@ -361,7 +352,6 @@ def get_contracts():
         )
 
         if contract_size <= 0:
-
             contract_size = 1
 
         contracts[
@@ -388,7 +378,6 @@ def get_tickers():
         data,
         dict
     ):
-
         return []
 
     rows = data.get(
@@ -400,7 +389,6 @@ def get_tickers():
         rows,
         list
     ):
-
         return []
 
     return rows
@@ -461,36 +449,33 @@ def get_kline(
         data,
         dict
     ):
-
         return None
 
-    required = [
+    keys = (
         "time",
         "open",
         "close",
         "high",
         "low",
         "vol"
-    ]
+    )
 
-    for key in required:
-
-        if key not in data:
-
-            return None
+    if any(
+        key not in data
+        for key in keys
+    ):
+        return None
 
     try:
 
-        length = min(
-            len(data[x])
-            for x in required
+        n = min(
+            len(data[key])
+            for key in keys
         )
 
         candles = []
 
-        for i in range(
-            length
-        ):
+        for i in range(n):
 
             candles.append({
 
@@ -556,7 +541,6 @@ def get_deals(
         data,
         dict
     ):
-
         return None
 
     rows = data.get(
@@ -568,7 +552,6 @@ def get_deals(
         rows,
         list
     ):
-
         return None
 
     buy_open = 0.0
@@ -611,13 +594,11 @@ def get_deals(
             )
         )
 
-        # O=1 = pozisyon açılışı
         if (
             price <= 0
             or volume <= 0
             or open_type != 1
         ):
-
             continue
 
         notional = (
@@ -626,18 +607,14 @@ def get_deals(
             * contract_size
         )
 
-        # T=1 alış
         if trade_type == 1:
 
             buy_open += notional
-
             buy_count += 1
 
-        # T=2 satış
         elif trade_type == 2:
 
             sell_open += notional
-
             sell_count += 1
 
     total = (
@@ -667,7 +644,6 @@ def get_deals(
     else:
 
         net_pct = 0
-
         buy_share = 0
 
     return {
@@ -709,7 +685,6 @@ def analyze_tf(candles):
         not candles
         or len(candles) < 60
     ):
-
         return None
 
     closes = [
@@ -757,9 +732,9 @@ def analyze_tf(candles):
         closes[:-1]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DESTEK / DİRENÇ
-    # --------------------------------------------------------
+    # ========================================================
 
     resistance = max(
         highs[-21:-1]
@@ -777,9 +752,9 @@ def analyze_tf(candles):
         lows[-22:-2]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # HACİM
-    # --------------------------------------------------------
+    # ========================================================
 
     volume_average = average(
         volumes[-21:-1]
@@ -796,9 +771,9 @@ def analyze_tf(candles):
 
     )
 
-    # --------------------------------------------------------
-    # DİRENÇ MESAFESİ
-    # --------------------------------------------------------
+    # ========================================================
+    # BREAKOUT
+    # ========================================================
 
     long_break = (
         price > resistance
@@ -823,9 +798,9 @@ def analyze_tf(candles):
 
     ) * 100
 
-    # --------------------------------------------------------
+    # ========================================================
     # TREND
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         price > ema9
@@ -847,9 +822,9 @@ def analyze_tf(candles):
 
         trend = "MIXED"
 
-    # --------------------------------------------------------
-    # HIGHER LOW
-    # --------------------------------------------------------
+    # ========================================================
+    # HIGHER LOW / LOWER HIGH
+    # ========================================================
 
     higher_low = (
 
@@ -869,9 +844,9 @@ def analyze_tf(candles):
 
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # MOMENTUM
-    # --------------------------------------------------------
+    # ========================================================
 
     momentum_long = (
 
@@ -889,9 +864,9 @@ def analyze_tf(candles):
 
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SIKIŞMA
-    # --------------------------------------------------------
+    # ========================================================
 
     ranges = []
 
@@ -983,15 +958,17 @@ def analyze_tf(candles):
 
         long_score += 5
 
-    # Yapı
+    # Higher low
     if higher_low:
 
         long_score += 8
 
+    # Sıkışma
     if compression:
 
         long_score += 7
 
+    # Momentum
     if momentum_long:
 
         long_score += 5
@@ -1146,7 +1123,6 @@ def calculate_money_score(
     ]
 
     if total <= 0:
-
         return 0
 
     ratio = (
@@ -1173,43 +1149,33 @@ def calculate_money_score(
     score = 0
 
     if total >= 15_000:
-
         score += 8
 
     if total >= 30_000:
-
         score += 5
 
     if total >= 75_000:
-
         score += 5
 
     if ratio >= 0.0005:
-
         score += 4
 
     if ratio >= 0.001:
-
         score += 4
 
     if net >= 15:
-
         score += 4
 
     if net >= 30:
-
         score += 5
 
     if net >= 50:
-
         score += 5
 
     if share >= 65:
-
         score += 4
 
     if share >= 80:
-
         score += 5
 
     return int(
@@ -1222,7 +1188,7 @@ def calculate_money_score(
 
 
 # ============================================================
-# GİRİŞ PLANI
+# GİRİŞ BÖLGESİ
 # ============================================================
 
 def calculate_entry(
@@ -1236,9 +1202,9 @@ def calculate_entry(
         "close"
     ]
 
-    # --------------------------------------------------------
+    # ========================================================
     # LONG
-    # --------------------------------------------------------
+    # ========================================================
 
     if direction == "LONG":
 
@@ -1258,28 +1224,16 @@ def calculate_entry(
 
         )
 
-        breakout = (
-            resistance
-            * 1.002
+        breakout_price = (
+            resistance * 1.002
         )
 
-        if (
+        # Kırılım henüz gerçekleşmediyse
+        if not (
             t15["long_break"]
             or t1["long_break"]
         ):
 
-            # Kırılım gerçekleşmiş
-            entry_low = (
-                price * 0.997
-            )
-
-            entry_high = (
-                price * 1.002
-            )
-
-        else:
-
-            # Kırılım öncesi bölge
             entry_low = max(
 
                 support,
@@ -1296,6 +1250,8 @@ def calculate_entry(
 
             )
 
+            # Bölge bozuksa fiyata yakın
+            # küçük bir giriş aralığı oluştur.
             if entry_high <= entry_low:
 
                 entry_low = (
@@ -1305,6 +1261,18 @@ def calculate_entry(
                 entry_high = (
                     price * 1.002
                 )
+
+        else:
+
+            # Breakout gerçekleşmişse
+            # mevcut fiyata yakın retest alanı.
+            entry_low = (
+                price * 0.997
+            )
+
+            entry_high = (
+                price * 1.002
+            )
 
         # Stop
         risk = max(
@@ -1319,7 +1287,6 @@ def calculate_entry(
             risk * 0.75
         )
 
-        # Stop maksimum %4
         stop = max(
 
             stop,
@@ -1331,8 +1298,7 @@ def calculate_entry(
         risk_pct = (
 
             (
-                price
-                - stop
+                price - stop
             )
             / price
             * 100
@@ -1347,28 +1313,22 @@ def calculate_entry(
 
         tp1 = price * (
             1
-            + risk_pct
-            * 1.5
-            / 100
+            + risk_pct * 1.5 / 100
         )
 
         tp2 = price * (
             1
-            + risk_pct
-            * 2.5
-            / 100
+            + risk_pct * 2.5 / 100
         )
 
         tp3 = price * (
             1
-            + risk_pct
-            * 4.0
-            / 100
+            + risk_pct * 4.0 / 100
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SHORT
-    # --------------------------------------------------------
+    # ========================================================
 
     else:
 
@@ -1388,25 +1348,14 @@ def calculate_entry(
 
         )
 
-        breakout = (
-            support
-            * 0.998
+        breakout_price = (
+            support * 0.998
         )
 
-        if (
+        if not (
             t15["short_break"]
             or t1["short_break"]
         ):
-
-            entry_low = (
-                price * 0.998
-            )
-
-            entry_high = (
-                price * 1.003
-            )
-
-        else:
 
             entry_low = max(
 
@@ -1434,6 +1383,16 @@ def calculate_entry(
                     price * 1.003
                 )
 
+        else:
+
+            entry_low = (
+                price * 0.998
+            )
+
+            entry_high = (
+                price * 1.003
+            )
+
         risk = max(
 
             resistance - price,
@@ -1457,8 +1416,7 @@ def calculate_entry(
         risk_pct = (
 
             (
-                stop
-                - price
+                stop - price
             )
             / price
             * 100
@@ -1473,23 +1431,17 @@ def calculate_entry(
 
         tp1 = price * (
             1
-            - risk_pct
-            * 1.5
-            / 100
+            - risk_pct * 1.5 / 100
         )
 
         tp2 = price * (
             1
-            - risk_pct
-            * 2.5
-            / 100
+            - risk_pct * 2.5 / 100
         )
 
         tp3 = price * (
             1
-            - risk_pct
-            * 4.0
-            / 100
+            - risk_pct * 4.0 / 100
         )
 
     return {
@@ -1509,8 +1461,8 @@ def calculate_entry(
                 entry_high
             ),
 
-        "breakout":
-            breakout,
+        "breakout_price":
+            breakout_price,
 
         "support":
             support,
@@ -1552,15 +1504,12 @@ def analyze_symbol(
             )
         )
 
-        if (
-            amount24
-            < MIN_24H_AMOUNT
-        ):
+        if amount24 < MIN_24H_AMOUNT:
 
             return None
 
         # ====================================================
-        # TIMEFRAME
+        # 15M / 1H / 4H
         # ====================================================
 
         tf = {}
@@ -1606,6 +1555,10 @@ def analyze_symbol(
         if not flow:
 
             return None
+
+        # ====================================================
+        # YÖN
+        # ====================================================
 
         if (
             flow["buy_open"]
@@ -1683,33 +1636,23 @@ def analyze_symbol(
 
         )
 
-        if (
-            money
-            < MIN_MONEY_SCORE
-        ):
+        if money < MIN_MONEY_SCORE:
 
             return None
 
         # ====================================================
-        # TEKNİK YÖN
+        # TEKNİK
         # ====================================================
 
         if direction == "LONG":
 
             technical = (
 
-                t15["long_score"]
-                * 0.35
+                t15["long_score"] * 0.35
 
-                +
+                + t1["long_score"] * 0.40
 
-                t1["long_score"]
-                * 0.40
-
-                +
-
-                t4["long_score"]
-                * 0.25
+                + t4["long_score"] * 0.25
 
             )
 
@@ -1751,18 +1694,11 @@ def analyze_symbol(
 
             technical = (
 
-                t15["short_score"]
-                * 0.35
+                t15["short_score"] * 0.35
 
-                +
+                + t1["short_score"] * 0.40
 
-                t1["short_score"]
-                * 0.40
-
-                +
-
-                t4["short_score"]
-                * 0.25
+                + t4["short_score"] * 0.25
 
             )
 
@@ -1801,15 +1737,10 @@ def analyze_symbol(
             )
 
         # ====================================================
-        # DİRENÇ YAKINLIĞI
+        # DİRENÇ / DESTEK YAKINLIĞI
         # ====================================================
 
-        near = (
-            distance
-            >= -3.5
-        )
-
-        if not near:
+        if distance < -3.5:
 
             return None
 
@@ -1843,29 +1774,24 @@ def analyze_symbol(
 
                 money
 
-                +
+                + technical * 0.60
 
-                technical
-                * 0.60
-
-                +
-
-                volume_score
+                + volume_score
 
             )
         )
 
-        # Aşırı ısınma
+        # Aşırı ısınmış
         if overheated:
 
             final -= 12
 
-        # Kırılım kaçmışsa
+        # Kırılım çoktan kaçmışsa
         if breakout and distance > 1.5:
 
             final -= 10
 
-        # Trend tamamen ters ise
+        # Trend uyumsuzluğu
         if not trend_ok:
 
             final -= 5
@@ -1878,10 +1804,7 @@ def analyze_symbol(
             )
         )
 
-        if (
-            final
-            < MIN_FINAL_SCORE
-        ):
+        if final < MIN_FINAL_SCORE:
 
             return None
 
@@ -1936,24 +1859,18 @@ def analyze_symbol(
             and final >= 72
         ):
 
-            status = (
-                "BREAKOUT ENTRY"
-            )
+            status = "BREAKOUT ENTRY"
 
         elif (
             pre_pump
             and final >= 52
         ):
 
-            status = (
-                "PRE-PUMP"
-            )
+            status = "PRE-PUMP"
 
         elif final >= 68:
 
-            status = (
-                "STRONG ENTRY"
-            )
+            status = "STRONG ENTRY"
 
         else:
 
@@ -2040,19 +1957,15 @@ def format_price(value):
     value = num(value)
 
     if value >= 1000:
-
         return f"{value:,.2f}"
 
     if value >= 1:
-
         return f"{value:.4f}"
 
     if value >= 0.01:
-
         return f"{value:.6f}"
 
     if value >= 0.0001:
-
         return f"{value:.8f}"
 
     return f"{value:.10f}"
@@ -2085,14 +1998,13 @@ def format_money(value):
 # TELEGRAM MESAJI
 # ============================================================
 
-def build_trade_message(item):
+def build_message(x):
 
     direction = (
 
         "🟢 LONG"
 
-        if item["direction"]
-        == "LONG"
+        if x["direction"] == "LONG"
 
         else
 
@@ -2100,15 +2012,11 @@ def build_trade_message(item):
 
     )
 
-    flow = item[
-        "flow_pct"
-    ]
-
-    if flow >= 60:
+    if x["flow_pct"] >= 60:
 
         fire = "🔥🔥🔥"
 
-    elif flow >= 35:
+    elif x["flow_pct"] >= 35:
 
         fire = "🔥🔥"
 
@@ -2116,81 +2024,71 @@ def build_trade_message(item):
 
         fire = "🔥"
 
-    if (
-        item["status"]
-        == "BREAKOUT ENTRY"
-    ):
+    if x["status"] == "BREAKOUT ENTRY":
 
-        trigger = (
-            "🚀 KIRILIM ONAYI"
-        )
+        trigger = "🚀 KIRILIM ONAYI"
 
     else:
 
-        trigger = (
-            "🚀 KIRILIM GİRİŞİ"
-        )
+        trigger = "🚀 KIRILIM GİRİŞİ"
 
     return (
 
-        f"🚨 {item['status']} / "
-        f"{direction}\n\n"
+        f"🚨 {x['status']} / {direction}\n\n"
 
-        f"🪙 {item['symbol']}\n"
+        f"🪙 {x['symbol']}\n"
 
-        f"⭐ Skor: "
-        f"{item['score']}/100\n\n"
+        f"⭐ {x['score']}/100\n\n"
 
         f"💰 Para Akışı: "
-        f"{fire} "
-        f"+{flow:.1f}%\n"
+        f"{fire} +{x['flow_pct']:.1f}%\n"
 
         f"💵 Açılış Akışı: "
-        f"{format_money(item['open_total'])}\n"
+        f"{format_money(x['open_total'])}\n"
 
         f"📈 Alış Baskısı: "
-        f"{item['buy_share']:.0f}%\n"
+        f"{x['buy_share']:.0f}%\n"
 
         f"📊 Hacim: "
-        f"{item['volume']:.1f}x\n\n"
+        f"{x['volume']:.1f}x\n\n"
 
         f"📍 GİRİŞ BÖLGESİ\n"
 
-        f"{format_price(item['entry_low'])}"
+        f"{format_price(x['entry_low'])}"
         f" – "
-        f"{format_price(item['entry_high'])}\n\n"
+        f"{format_price(x['entry_high'])}\n\n"
 
         f"{trigger}\n"
 
-        f"{format_price(item['breakout'])}\n\n"
+        f"{format_price(x['breakout_price'])}\n\n"
 
         f"🛑 STOP\n"
 
-        f"{format_price(item['stop'])}\n\n"
+        f"{format_price(x['stop'])}\n\n"
 
         f"🎯 TP1 "
-        f"{format_price(item['tp1'])}\n"
+        f"{format_price(x['tp1'])}\n"
 
         f"🎯 TP2 "
-        f"{format_price(item['tp2'])}\n"
+        f"{format_price(x['tp2'])}\n"
 
         f"🎯 TP3 "
-        f"{format_price(item['tp3'])}\n\n"
+        f"{format_price(x['tp3'])}\n\n"
 
         f"📌 Destek: "
-        f"{format_price(item['support'])}\n"
+        f"{format_price(x['support'])}\n"
 
         f"🎯 Direnç: "
-        f"{format_price(item['resistance'])}\n\n"
+        f"{format_price(x['resistance'])}\n\n"
 
-        f"⚠️ Teknik sinyal. "
+        f"⚠️ Teknik sinyaldir. "
         f"Otomatik işlem açmaz."
 
     )
 
 
 # ============================================================
-# TELEGRAM GÖNDER
+# TELEGRAM
 # ============================================================
 
 def send_telegram(message):
@@ -2205,7 +2103,7 @@ def send_telegram(message):
 
     try:
 
-        response = session.post(
+        r = session.post(
 
             f"https://api.telegram.org/"
             f"bot{TOKEN}/sendMessage",
@@ -2227,7 +2125,7 @@ def send_telegram(message):
 
         )
 
-        if response.ok:
+        if r.ok:
 
             print(
                 "Telegram gönderildi."
@@ -2237,7 +2135,7 @@ def send_telegram(message):
 
         print(
             "Telegram HATASI:",
-            response.text
+            r.text
         )
 
     except Exception as e:
@@ -2268,18 +2166,18 @@ def load_state():
                 file
             )
 
-        if isinstance(
-            data,
-            dict
-        ):
-
-            return data
+        return (
+            data
+            if isinstance(
+                data,
+                dict
+            )
+            else {}
+        )
 
     except Exception:
 
-        pass
-
-    return {}
+        return {}
 
 
 def save_state(state):
@@ -2402,8 +2300,7 @@ def should_alert(
 
     alert = (
 
-        new_level
-        > old_level
+        new_level > old_level
 
         or
 
@@ -2439,7 +2336,7 @@ def should_alert(
 
 def main():
 
-    start = time.time()
+    started = time.time()
 
     print("=" * 60)
 
@@ -2494,15 +2391,15 @@ def main():
     ticker_map = {
 
         str(
-            x.get(
+            item.get(
                 "symbol",
                 ""
             )
         ).upper():
 
-        x
+        item
 
-        for x in tickers
+        for item in tickers
 
     }
 
@@ -2583,30 +2480,21 @@ def main():
 
             continue
 
-        # ====================================================
-        # 24H KONUM
-        # ====================================================
-
+        # 24H aralığındaki konum
         if high > low:
 
             position = (
 
                 price - low
-
             ) / (
-
                 high - low
-
             )
 
         else:
 
             position = 0.5
 
-        # ====================================================
-        # RANK
-        # ====================================================
-
+        # Çoktan uçmuş coinleri aşağı at.
         rank = (
 
             math.log10(
@@ -2622,8 +2510,7 @@ def main():
             - max(
                 change - 25,
                 0
-            )
-            * 0.7
+            ) * 0.7
 
         )
 
@@ -2656,7 +2543,7 @@ def main():
     )
 
     print(
-        "🎯 Analiz:",
+        "🎯 Detaylı analiz:",
         len(candidates)
     )
 
@@ -2743,12 +2630,18 @@ def main():
     )
 
     # ========================================================
-    # EN İYİLER
+    # EN İYİ ADAYLAR
     # ========================================================
 
     print(
         "\n===== EN İYİ ADAYLAR ====="
     )
+
+    if not results:
+
+        print(
+            "❌ Uygun aday bulunamadı."
+        )
 
     for item in results[:10]:
 
@@ -2764,7 +2657,7 @@ def main():
 
             item["status"],
 
-            "|",
+            "| Skor:",
 
             item["score"],
 
@@ -2808,7 +2701,7 @@ def main():
     )
 
     # ========================================================
-    # MAX 6 ALARM
+    # MAX 6
     # ========================================================
 
     alerts = alerts[:6]
@@ -2825,9 +2718,15 @@ def main():
 
             item["symbol"],
 
+            "|",
+
             item["direction"],
 
+            "|",
+
             item["status"],
+
+            "|",
 
             item["score"]
 
@@ -2835,7 +2734,7 @@ def main():
 
         send_telegram(
 
-            build_trade_message(
+            build_message(
                 item
             )
 
@@ -2847,7 +2746,7 @@ def main():
 
     duration = (
         time.time()
-        - start
+        - started
     )
 
     summary = (
@@ -2871,17 +2770,20 @@ def main():
 
     )
 
-    send_telegram(
+    print(
         summary
     )
 
+    # Sadece gerçekten alarm varsa
+    # Telegram'a özet gönder.
+    if alerts:
+
+        send_telegram(
+            summary
+        )
+
     print(
-        "✅ Tarama tamamlandı:",
-        round(
-            duration,
-            1
-        ),
-        "sn"
+        "✅ RADAR BİTTİ"
     )
 
 
