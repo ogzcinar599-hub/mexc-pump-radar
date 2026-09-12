@@ -1,45 +1,94 @@
 name: MEXC Pump Radar
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
 
-permissions:
-  contents: write
+  # GitHub'dan elle çalıştır
+  workflow_dispatch:
+
+  # Her 10 dakikada bir çalıştır
+  schedule:
+
+    - cron: "*/10 * * * *"
+
 
 jobs:
+
   radar:
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 8
 
     steps:
 
+      # ======================================================
+      # REPOSITORY
+      # ======================================================
+
       - name: Repository indir
+
         uses: actions/checkout@v4
 
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
       - name: Python kurulumu
+
         uses: actions/setup-python@v5
+
         with:
+
           python-version: "3.11"
 
+
+      # ======================================================
+      # PAKETLER
+      # ======================================================
+
       - name: Paketleri kur
+
         run: |
-          pip install -r requirements.txt
+
+          python -m pip install --upgrade pip
+
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests
+          fi
+
+
+      # ======================================================
+      # RADAR
+      # ======================================================
 
       - name: Radar çalıştır
+
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: |
-          timeout 280 python main.py || true
 
-      - name: Sinyal geçmişini kaydet
+          python main.py
+
+
+      # ======================================================
+      # SONUÇ
+      # ======================================================
+
+      - name: Tamamlandı
+
+        if: success()
+
         run: |
-          git config --global user.name "MEXC Pump Radar"
-          git config --global user.email "actions@github.com"
 
-          git add sent_signals.json || true
+          echo "========================================="
 
-          git diff --cached --quiet || git commit -m "Update signal history"
+          echo "🚀 MEXC PUMP RADAR TAMAMLANDI"
 
-          git push || true
+          echo "========================================="
