@@ -1,40 +1,23 @@
 import os
-import json
 import time
-import math
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# 🚀 MEXC LSK-PRE-PUMP RADAR V1
+# 🚀 MEXC PUMP RADAR V2
 #
 # AMAÇ:
-# LSK gibi büyük hareketleri PUMP başlamadan önce yakalamak
+# LSK gibi büyük hareketleri başlamadan ÖNCE yakalamak
 #
-# SADECE:
-# ✅ MEXC USDT FUTURES
-# ✅ 15M
-# ✅ 1H
-# ✅ 4H
-# ✅ RSI
-# ✅ HACİM
-# ✅ MOMENTUM
-# ✅ MA YAPISI
-# ✅ SIKIŞMA
-# ✅ BREAKOUT
+# ANA MANTIK:
+# 4H SIKIŞMA
+# + HACİM GİRİŞİ
+# + DİRENÇ YAKINLIĞI
+# + HIGHER LOW
+# + MOMENTUM
+# + RSI TEYİDİ
 #
-# ❌ SPOT YOK
-# ❌ STOCK YOK
-# ❌ ZATEN PUMP YAPMIŞ COINLER YOK
-#
-# TELEGRAM:
-# TELEGRAM_BOT_TOKEN
-# TELEGRAM_CHAT_ID
-# ============================================================
-
-
-# ============================================================
-# AYARLAR
+# SADECE MEXC USDT FUTURES
 # ============================================================
 
 BASE = "https://api.mexc.com"
@@ -43,60 +26,41 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SCAN_SECONDS = 60
-
 MAX_WORKERS = 12
 
-# Aynı coin tekrar tekrar Telegram'a düşmesin
-COOLDOWN_MINUTES = 30
+MIN_SCORE = 70
+MAX_ALERTS = 6
 
-# Minimum skor
-MIN_SCORE = 72
+COOLDOWN_MINUTES = 45
 
-# Telegram'a maksimum coin
-MAX_ALERTS = 8
+last_alert = {}
 
+session = requests.Session()
 
-# ============================================================
-# HTTP SESSION
-# ============================================================
-
-SESSION = requests.Session()
-
-SESSION.headers.update({
+session.headers.update({
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json"
 })
 
 
 # ============================================================
-# CACHE
+# HTTP
 # ============================================================
 
-last_alert = {}
-
-symbol_cache = None
-
-
-# ============================================================
-# SAFE GET
-# ============================================================
-
-def get(url, params=None, timeout=10):
+def get(url, params=None):
 
     try:
 
-        r = SESSION.get(
+        r = session.get(
             url,
             params=params,
-            timeout=timeout
+            timeout=10
         )
 
         if r.status_code != 200:
             return None
 
-        data = r.json()
-
-        return data
+        return r.json()
 
     except Exception:
         return None
@@ -106,32 +70,33 @@ def get(url, params=None, timeout=10):
 # TELEGRAM
 # ============================================================
 
-def telegram(text):
+def telegram(message):
 
     if not TOKEN or not CHAT_ID:
-        print(text)
+        print(message)
         return
 
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TOKEN}/sendMessage"
+    )
 
     payload = {
         "chat_id": CHAT_ID,
-        "text": text,
+        "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
 
     try:
-
-        SESSION.post(
+        session.post(
             url,
             json=payload,
             timeout=10
         )
 
     except Exception as e:
-
-        print("Telegram error:", e)
+        print("Telegram:", e)
 
 
 # ============================================================
@@ -140,12 +105,6 @@ def telegram(text):
 
 def get_symbols():
 
-    global symbol_cache
-
-    # Cache kullan
-    if symbol_cache:
-        return symbol_cache
-
     data = get(
         f"{BASE}/api/v1/contract/detail"
     )
@@ -153,64 +112,39 @@ def get_symbols():
     if not data:
         return []
 
-    result = []
+    symbols = []
 
-    rows = data.get("data", [])
+    for item in data.get("data", []):
 
-    for x in rows:
-
-        symbol = x.get("symbol", "")
-
-        # ----------------------------------------------------
-        # SADECE USDT
-        # ----------------------------------------------------
+        symbol = item.get("symbol", "")
 
         if not symbol.endswith("_USDT"):
             continue
 
-        # ----------------------------------------------------
-        # ENABLED / OPEN
-        # ----------------------------------------------------
+        state = item.get("state")
 
-        state = x.get("state")
+        try:
 
-        if state is not None:
+            if state is not None and int(state) != 0:
+                continue
 
-            try:
+        except:
+            pass
 
-                if int(state) != 0:
-                    continue
+        symbols.append(symbol)
 
-            except:
-                pass
-
-        # ----------------------------------------------------
-        # STOCK / AKTİF OLMAYAN / SADECE TEST VB.
-        # ----------------------------------------------------
-
-        if not symbol:
-            continue
-
-        result.append(symbol)
-
-    symbol_cache = result
-
-    print(
-        f"📡 Futures sembol sayısı: {len(result)}"
-    )
-
-    return result
+    return symbols
 
 
 # ============================================================
 # KLINE
 # ============================================================
 
-def get_klines(symbol, interval, limit=120):
+def klines(symbol, interval, limit=120):
 
     data = get(
         f"{BASE}/api/v1/contract/kline/{symbol}",
-        params={
+        {
             "interval": interval,
             "limit": limit
         }
@@ -219,70 +153,81 @@ def get_klines(symbol, interval, limit=120):
     if not data:
         return []
 
-    rows = data.get("data")
+    d = data.get("data")
 
-    if not rows:
+    if not d:
         return []
 
-    # MEXC response formatı bazı sürümlerde dict
-    if isinstance(rows, dict):
+    # --------------------------------------------------------
+    # DICT FORMAT
+    # --------------------------------------------------------
 
-        times = rows.get("time", [])
-        opens = rows.get("open", [])
-        highs = rows.get("high", [])
-        lows = rows.get("low", [])
-        closes = rows.get("close", [])
-        vols = rows.get("vol", [])
+    if isinstance(d, dict):
 
-        candles = []
+        t = d.get("time", [])
+        o = d.get("open", [])
+        h = d.get("high", [])
+        l = d.get("low", [])
+        c = d.get("close", [])
+        v = d.get("vol", [])
 
-        for i in range(
-            min(
-                len(times),
-                len(opens),
-                len(highs),
-                len(lows),
-                len(closes),
-                len(vols)
-            )
-        ):
+        result = []
 
-            candles.append({
-                "time": float(times[i]),
-                "open": float(opens[i]),
-                "high": float(highs[i]),
-                "low": float(lows[i]),
-                "close": float(closes[i]),
-                "volume": float(vols[i])
-            })
+        n = min(
+            len(t),
+            len(o),
+            len(h),
+            len(l),
+            len(c),
+            len(v)
+        )
 
-        return candles
-
-    # Liste formatı
-    if isinstance(rows, list):
-
-        candles = []
-
-        for row in rows:
+        for i in range(n):
 
             try:
 
-                if len(row) < 6:
-                    continue
-
-                candles.append({
-                    "time": float(row[0]),
-                    "open": float(row[1]),
-                    "high": float(row[2]),
-                    "low": float(row[3]),
-                    "close": float(row[4]),
-                    "volume": float(row[5])
+                result.append({
+                    "time": float(t[i]),
+                    "open": float(o[i]),
+                    "high": float(h[i]),
+                    "low": float(l[i]),
+                    "close": float(c[i]),
+                    "volume": float(v[i])
                 })
 
             except:
-                continue
+                pass
 
-        return candles
+        return result
+
+    # --------------------------------------------------------
+    # LIST FORMAT
+    # --------------------------------------------------------
+
+    if isinstance(d, list):
+
+        result = []
+
+        for x in d:
+
+            try:
+
+                if len(x) < 6:
+                    continue
+
+                result.append({
+                    "time": float(x[0]),
+                    "open": float(x[1]),
+                    "high": float(x[2]),
+                    "low": float(x[3]),
+                    "close": float(x[4]),
+                    "volume": float(x[5])
+                })
+
+            except:
+                pass
+
+        return result
 
     return []
 
@@ -291,25 +236,25 @@ def get_klines(symbol, interval, limit=120):
 # RSI
 # ============================================================
 
-def rsi(closes, period=14):
+def RSI(values, period=14):
 
-    if len(closes) < period + 2:
+    if len(values) < period + 2:
         return None
 
     gains = []
     losses = []
 
-    for i in range(1, len(closes)):
+    for i in range(1, len(values)):
 
-        diff = closes[i] - closes[i - 1]
+        diff = values[i] - values[i - 1]
 
-        gains.append(
-            max(diff, 0)
-        )
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
 
-        losses.append(
-            max(-diff, 0)
-        )
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
 
     avg_gain = sum(
         gains[:period]
@@ -348,7 +293,7 @@ def rsi(closes, period=14):
 # SMA
 # ============================================================
 
-def sma(values, period):
+def SMA(values, period):
 
     if len(values) < period:
         return None
@@ -359,33 +304,7 @@ def sma(values, period):
 
 
 # ============================================================
-# EMA
-# ============================================================
-
-def ema(values, period):
-
-    if len(values) < period:
-        return None
-
-    multiplier = 2 / (
-        period + 1
-    )
-
-    result = sum(
-        values[:period]
-    ) / period
-
-    for price in values[period:]:
-
-        result = (
-            price - result
-        ) * multiplier + result
-
-    return result
-
-
-# ============================================================
-# VOLUME RATIO
+# HACİM ORANI
 # ============================================================
 
 def volume_ratio(candles, lookback=20):
@@ -395,12 +314,14 @@ def volume_ratio(candles, lookback=20):
 
     current = candles[-1]["volume"]
 
-    previous = [
+    old = [
         x["volume"]
-        for x in candles[-lookback-1:-1]
+        for x in candles[
+            -lookback-1:-1
+        ]
     ]
 
-    avg = sum(previous) / len(previous)
+    avg = sum(old) / len(old)
 
     if avg <= 0:
         return 0
@@ -409,127 +330,65 @@ def volume_ratio(candles, lookback=20):
 
 
 # ============================================================
-# PRICE CHANGE
+# DEĞİŞİM
 # ============================================================
 
-def change_percent(candles, bars):
+def change(candles, bars):
 
     if len(candles) <= bars:
         return 0
 
     old = candles[-bars-1]["close"]
 
-    new = candles[-1]["close"]
+    now = candles[-1]["close"]
 
     if old <= 0:
         return 0
 
     return (
-        (new - old) / old
+        (now - old)
+        / old
     ) * 100
 
 
 # ============================================================
-# ATR
+# 4H SIKIŞMA
 # ============================================================
 
-def atr(candles, period=14):
-
-    if len(candles) < period + 2:
-        return None
-
-    trs = []
-
-    for i in range(1, len(candles)):
-
-        h = candles[i]["high"]
-        l = candles[i]["low"]
-        pc = candles[i - 1]["close"]
-
-        tr = max(
-            h - l,
-            abs(h - pc),
-            abs(l - pc)
-        )
-
-        trs.append(tr)
-
-    return sum(
-        trs[-period:]
-    ) / period
-
-
-# ============================================================
-# SIKIŞMA
-# ============================================================
-
-def compression(candles, lookback=20):
-
-    if len(candles) < lookback:
-        return False, 0
-
-    recent = candles[-lookback:]
-
-    highs = [
-        x["high"]
-        for x in recent
-    ]
-
-    lows = [
-        x["low"]
-        for x in recent
-    ]
-
-    highest = max(highs)
-
-    lowest = min(lows)
-
-    if lowest <= 0:
-        return False, 0
-
-    width = (
-        (highest - lowest)
-        / lowest
-    ) * 100
-
-    # Dar bant
-    compressed = width <= 18
-
-    return compressed, width
-
-
-# ============================================================
-# BREAKOUT
-# ============================================================
-
-def breakout(candles):
+def compression(candles):
 
     if len(candles) < 25:
-        return False, 0
+        return False, 999
 
-    current = candles[-1]
+    recent = candles[-20:]
 
-    previous = candles[-21:-1]
-
-    resistance = max(
+    high = max(
         x["high"]
-        for x in previous
+        for x in recent
     )
 
-    price = current["close"]
+    low = min(
+        x["low"]
+        for x in recent
+    )
 
-    if resistance <= 0:
-        return False, 0
+    if low <= 0:
+        return False, 999
 
-    distance = (
-        (price - resistance)
-        / resistance
+    width = (
+        (high - low)
+        / low
     ) * 100
 
-    return (
-        price >= resistance * 0.995,
-        distance
-    )
+    # LSK benzeri sıkışma
+    if width <= 15:
+        return True, width
+
+    # Biraz gevşek
+    if width <= 22:
+        return True, width
+
+    return False, width
 
 
 # ============================================================
@@ -541,267 +400,312 @@ def higher_low(candles):
     if len(candles) < 12:
         return False
 
-    a = candles[-12:-6]
-    b = candles[-6:]
+    left = candles[-12:-6]
+    right = candles[-6:]
 
-    low_a = min(
+    low1 = min(
         x["low"]
-        for x in a
+        for x in left
     )
 
-    low_b = min(
+    low2 = min(
         x["low"]
-        for x in b
+        for x in right
     )
 
-    return low_b > low_a
+    return low2 > low1
 
 
 # ============================================================
-# TEKNİK ANALİZ
+# DİRENÇ
+# ============================================================
+
+def resistance_info(candles):
+
+    if len(candles) < 25:
+        return None, 999
+
+    previous = candles[-21:-1]
+
+    resistance = max(
+        x["high"]
+        for x in previous
+    )
+
+    price = candles[-1]["close"]
+
+    if resistance <= 0:
+        return resistance, 999
+
+    distance = (
+        (resistance - price)
+        / resistance
+    ) * 100
+
+    return resistance, distance
+
+
+# ============================================================
+# MOMENTUM
+# ============================================================
+
+def momentum_score(c15, c1):
+
+    m15_now = change(c15, 4)
+    m15_old = change(c15[:-4], 4)
+
+    m1_now = change(c1, 4)
+    m1_old = change(c1[:-4], 4)
+
+    score = 0
+    reasons = []
+
+    if m15_now > m15_old:
+
+        score += 8
+
+        reasons.append(
+            "15M momentum↑"
+        )
+
+    if m1_now > m1_old:
+
+        score += 7
+
+        reasons.append(
+            "1H momentum↑"
+        )
+
+    return score, reasons
+
+
+# ============================================================
+# ANA ANALİZ
 # ============================================================
 
 def analyze(symbol):
 
     try:
 
-        c15 = get_klines(
+        c15 = klines(
             symbol,
             "Min15",
-            100
+            120
         )
 
-        c1h = get_klines(
+        c1 = klines(
             symbol,
             "Hour1",
-            100
+            120
         )
 
-        c4h = get_klines(
+        c4 = klines(
             symbol,
             "Hour4",
-            100
+            120
         )
 
         if (
-            len(c15) < 40
-            or len(c1h) < 40
-            or len(c4h) < 40
+            len(c15) < 60
+            or len(c1) < 60
+            or len(c4) < 60
         ):
             return None
 
-        # ====================================================
-        # FİYAT
-        # ====================================================
+        close15 = [
+            x["close"]
+            for x in c15
+        ]
 
-        price = c15[-1]["close"]
+        close1 = [
+            x["close"]
+            for x in c1
+        ]
+
+        close4 = [
+            x["close"]
+            for x in c4
+        ]
+
+        price = close15[-1]
 
         # ====================================================
         # RSI
         # ====================================================
 
-        rsi15 = rsi([
-            x["close"]
-            for x in c15
-        ])
+        r15 = RSI(close15)
+        r1 = RSI(close1)
+        r4 = RSI(close4)
 
-        rsi1h = rsi([
-            x["close"]
-            for x in c1h
-        ])
-
-        rsi4h = rsi([
-            x["close"]
-            for x in c4h
-        ])
-
-        if (
-            rsi15 is None
-            or rsi1h is None
-            or rsi4h is None
-        ):
+        if None in (r15, r1, r4):
             return None
 
         # ====================================================
         # HACİM
         # ====================================================
 
-        vol15 = volume_ratio(
-            c15,
-            20
-        )
+        v15 = volume_ratio(c15)
+        v1 = volume_ratio(c1)
+        v4 = volume_ratio(c4)
 
-        vol1h = volume_ratio(
-            c1h,
-            20
-        )
+        # ====================================================
+        # HAREKET
+        # ====================================================
 
-        vol4h = volume_ratio(
-            c4h,
-            20
+        p15 = change(c15, 4)
+        p1 = change(c1, 4)
+        p4 = change(c4, 4)
+        p24 = change(c15, 96)
+
+        # ====================================================
+        # GEÇ KALANLARI ELE
+        # ====================================================
+
+        if p24 >= 30:
+            return None
+
+        if p4 >= 20:
+            return None
+
+        if p1 >= 15:
+            return None
+
+        if r15 >= 76:
+            return None
+
+        # ====================================================
+        # SIKIŞMA
+        # ====================================================
+
+        compressed, width = compression(c4)
+
+        # ====================================================
+        # DİRENÇ
+        # ====================================================
+
+        resistance, resistance_distance = (
+            resistance_info(c15)
         )
 
         # ====================================================
-        # 4H MA
+        # HIGHER LOW
         # ====================================================
 
-        close4 = [
-            x["close"]
-            for x in c4h
-        ]
+        hl4 = higher_low(c4)
+        hl1 = higher_low(c1)
 
-        ma5 = sma(
-            close4,
-            5
-        )
+        # ====================================================
+        # MA
+        # ====================================================
 
-        ma10 = sma(
-            close4,
-            10
-        )
-
-        ma30 = sma(
-            close4,
-            30
-        )
-
-        ma60 = sma(
-            close4,
-            60
-        )
+        ma5 = SMA(close4, 5)
+        ma10 = SMA(close4, 10)
+        ma30 = SMA(close4, 30)
 
         if None in (
             ma5,
             ma10,
-            ma30,
-            ma60
+            ma30
         ):
             return None
 
         # ====================================================
-        # 4H SIKIŞMA
-        # ====================================================
-
-        is_compressed, width = compression(
-            c4h,
-            20
-        )
-
-        # ====================================================
-        # HIGHER LOW
-        # ====================================================
-
-        hl4 = higher_low(c4h)
-
-        hl1 = higher_low(c1h)
-
-        # ====================================================
-        # BREAKOUT
-        # ====================================================
-
-        br15, br15_distance = breakout(
-            c15
-        )
-
-        br1h, br1h_distance = breakout(
-            c1h
-        )
-
-        # ====================================================
-        # SON HAREKET
-        # ====================================================
-
-        move15 = change_percent(
-            c15,
-            4
-        )
-
-        move1h = change_percent(
-            c1h,
-            4
-        )
-
-        move4h = change_percent(
-            c4h,
-            4
-        )
-
-        move24 = change_percent(
-            c15,
-            96
-        )
-
-        # ====================================================
-        # ÇOK GEÇ KALMIŞ COINLERİ ELE
-        # ====================================================
-
-        if move24 > 45:
-            return None
-
-        if move4h > 30:
-            return None
-
-        if move1h > 20:
-            return None
-
-        # ====================================================
-        # SCORE
+        # SKOR
         # ====================================================
 
         score = 0
-
         reasons = []
 
         # ----------------------------------------------------
-        # 4H SIKIŞMA
+        # 1 — SIKIŞMA
+        # MAX 20
         # ----------------------------------------------------
 
-        if is_compressed:
+        if compressed:
 
-            score += 16
+            if width <= 15:
 
-            reasons.append(
-                "4H sıkışma"
-            )
+                score += 20
 
-        elif width <= 25:
+                reasons.append(
+                    "4H güçlü sıkışma"
+                )
 
-            score += 8
+            else:
 
-            reasons.append(
-                "4H dar bant"
-            )
+                score += 14
+
+                reasons.append(
+                    "4H sıkışma"
+                )
 
         # ----------------------------------------------------
-        # MA YAPISI
+        # 2 — HACİM
+        # MAX 20
         # ----------------------------------------------------
 
-        if ma5 > ma10:
+        if v15 >= 2.0:
 
             score += 10
 
             reasons.append(
-                "MA5>MA10"
+                f"15M hacim {v15:.1f}x"
             )
 
-        if ma10 > ma30:
+        elif v15 >= 1.5:
 
-            score += 7
+            score += 5
+
+        if v1 >= 1.8:
+
+            score += 10
 
             reasons.append(
-                "MA10>MA30"
+                f"1H hacim {v1:.1f}x"
             )
 
-        if price > ma30:
+        elif v1 >= 1.4:
 
-            score += 6
+            score += 5
+
+        # ----------------------------------------------------
+        # 3 — DİRENÇ
+        # MAX 20
+        # ----------------------------------------------------
+
+        if (
+            0 <= resistance_distance <= 2
+        ):
+
+            score += 20
 
             reasons.append(
-                "MA30 üstü"
+                "Direnç çok yakın"
+            )
+
+        elif (
+            2 < resistance_distance <= 5
+        ):
+
+            score += 15
+
+            reasons.append(
+                "Direnç yakın"
+            )
+
+        elif (
+            5 < resistance_distance <= 10
+        ):
+
+            score += 8
+
+            reasons.append(
+                "Dirence yaklaşıyor"
             )
 
         # ----------------------------------------------------
-        # HIGHER LOW
+        # 4 — HIGHER LOW
+        # MAX 15
         # ----------------------------------------------------
 
         if hl4:
@@ -821,169 +725,142 @@ def analyze(symbol):
             )
 
         # ----------------------------------------------------
-        # HACİM
+        # 5 — MOMENTUM
+        # MAX 15
         # ----------------------------------------------------
 
-        if vol15 >= 1.8:
+        ms, mr = momentum_score(
+            c15,
+            c1
+        )
 
-            score += 8
+        score += ms
 
-            reasons.append(
-                f"15M hacim {vol15:.1f}x"
-            )
+        reasons.extend(mr)
 
-        if vol15 >= 2.5:
+        # ----------------------------------------------------
+        # 6 — RSI
+        # MAX 10
+        # ----------------------------------------------------
 
-            score += 4
-
-        if vol1h >= 1.8:
+        # RSI sadece teyit
+        if (
+            52 <= r15 <= 68
+            and 50 <= r1 <= 68
+            and r4 >= 45
+        ):
 
             score += 10
 
             reasons.append(
-                f"1H hacim {vol1h:.1f}x"
+                "RSI üçlü uyum"
             )
 
-        if vol4h >= 1.4:
+        elif (
+            50 <= r15 <= 70
+            and 48 <= r1 <= 70
+        ):
 
             score += 5
-
-        # ----------------------------------------------------
-        # RSI
-        # ----------------------------------------------------
-
-        if 52 <= rsi15 <= 75:
-
-            score += 8
-
-            reasons.append(
-                f"15M RSI {rsi15:.0f}"
-            )
-
-        if 50 <= rsi1h <= 70:
-
-            score += 8
-
-            reasons.append(
-                f"1H RSI {rsi1h:.0f}"
-            )
-
-        if 45 <= rsi4h <= 68:
-
-            score += 5
-
-        # ----------------------------------------------------
-        # BREAKOUT
-        # ----------------------------------------------------
-
-        if br15:
-
-            score += 10
-
-            reasons.append(
-                "15M kırılım"
-            )
-
-        if br1h:
-
-            score += 8
-
-            reasons.append(
-                "1H kırılım"
-            )
-
-        # ----------------------------------------------------
-        # MOMENTUM
-        # ----------------------------------------------------
-
-        if 1 <= move15 <= 10:
-
-            score += 5
-
-            reasons.append(
-                "15M momentum"
-            )
-
-        if 2 <= move1h <= 15:
-
-            score += 5
-
-            reasons.append(
-                "1H momentum"
-            )
-
-        # ----------------------------------------------------
-        # AŞIRI DÜŞÜŞÜ ENGELLE
-        # ----------------------------------------------------
-
-        if rsi15 < 35:
-            score -= 10
-
-        if rsi1h < 40:
-            score -= 5
 
         # ====================================================
-        # SONUÇ
+        # KRİTİK FİLTRELER
+        # ====================================================
+
+        # Sıkışma yoksa 75 üstü olamaz
+        if not compressed:
+
+            score = min(
+                score,
+                69
+            )
+
+        # Hacim yoksa sinyal yok
+        if (
+            v15 < 1.3
+            and v1 < 1.3
+        ):
+
+            return None
+
+        # RSI aşırı düşükse
+        if r15 < 42:
+            return None
+
+        # Fiyat zaten çok hızlandıysa
+        if p15 > 12:
+            return None
+
+        # ====================================================
+        # MİN SKOR
         # ====================================================
 
         if score < MIN_SCORE:
             return None
 
         # ====================================================
-        # GİRİŞ / TP
+        # STAGE
         # ====================================================
 
-        atr15 = atr(
-            c15,
-            14
-        )
+        if score >= 88:
 
-        if atr15 is None:
-            atr15 = price * 0.01
+            stage = "🔥 ÇOK GÜÇLÜ ERKEN"
 
-        entry_low = price
+        elif score >= 80:
 
-        entry_high = price * 1.008
-
-        tp1 = price * 1.06
-        tp2 = price * 1.12
-        tp3 = price * 1.20
-
-        stop = price - (
-            atr15 * 1.5
-        )
-
-        # ====================================================
-        # PUMP STAGE
-        # ====================================================
-
-        if score >= 90:
-            stage = "🔥 ÇOK GÜÇLÜ"
-
-        elif score >= 82:
-            stage = "🚀 GÜÇLÜ"
+            stage = "🚀 GÜÇLÜ ERKEN"
 
         else:
-            stage = "⚡ ERKEN"
+
+            stage = "⚡ ERKEN ADAY"
+
+        # ====================================================
+        # GİRİŞ
+        # ====================================================
+
+        entry_low = price * 0.997
+        entry_high = price * 1.008
+
+        # ====================================================
+        # TP
+        # ====================================================
+
+        tp1 = price * 1.05
+        tp2 = price * 1.10
+        tp3 = price * 1.18
+
+        # ====================================================
+        # STOP
+        # ====================================================
+
+        stop = price * 0.975
 
         return {
+
             "symbol": symbol,
-            "price": price,
+
             "score": score,
+
             "stage": stage,
 
-            "rsi15": rsi15,
-            "rsi1h": rsi1h,
-            "rsi4h": rsi4h,
+            "price": price,
 
-            "vol15": vol15,
-            "vol1h": vol1h,
-            "vol4h": vol4h,
+            "r15": r15,
+            "r1": r1,
+            "r4": r4,
 
-            "move15": move15,
-            "move1h": move1h,
-            "move4h": move4h,
-            "move24": move24,
+            "v15": v15,
+            "v1": v1,
+
+            "p15": p15,
+            "p1": p1,
+            "p4": p4,
+            "p24": p24,
+
+            "width": width,
+
+            "resistance": resistance,
+            "resistance_distance": resistance_distance,
 
             "entry_low": entry_low,
             "entry_high": entry_high,
@@ -1010,22 +887,19 @@ def can_alert(symbol):
 
     now = time.time()
 
-    last = last_alert.get(
+    old = last_alert.get(
         symbol,
         0
     )
 
-    if (
-        now - last
-        < COOLDOWN_MINUTES * 60
-    ):
-        return False
-
-    return True
+    return (
+        now - old
+        >= COOLDOWN_MINUTES * 60
+    )
 
 
 # ============================================================
-# ALERT
+# TELEGRAM ALERT
 # ============================================================
 
 def send_alert(x):
@@ -1039,63 +913,71 @@ def send_alert(x):
         symbol
     ] = time.time()
 
-    reasons = " • ".join(
-        x["reasons"][:6]
+    reason_text = "\n".join(
+        [
+            f"• {r}"
+            for r in x["reasons"][:7]
+        ]
     )
 
     message = f"""
-<b>🚨 LSK TİPİ ERKEN PUMP RADAR</b>
+<b>🚀 LSK-TİPİ ERKEN PUMP</b>
 
 <b>{symbol}</b>
 
-<b>{x["stage"]}</b>
-Skor: <b>{x["score"]}/100</b>
+{x["stage"]}
+
+⭐ GÜÇ: <b>{x["score"]}/100</b>
 
 💰 Fiyat:
 <b>{x["price"]:.8g}</b>
 
 📊 RSI
-15M: <b>{x["rsi15"]:.1f}</b>
-1H: <b>{x["rsi1h"]:.1f}</b>
-4H: <b>{x["rsi4h"]:.1f}</b>
+15M: {x["r15"]:.1f}
+1H: {x["r1"]:.1f}
+4H: {x["r4"]:.1f}
 
 📈 HACİM
-15M: <b>{x["vol15"]:.1f}x</b>
-1H: <b>{x["vol1h"]:.1f}x</b>
+15M: <b>{x["v15"]:.1f}x</b>
+1H: <b>{x["v1"]:.1f}x</b>
 
-🚀 Hareket
-15M: {x["move15"]:+.1f}%
-1H: {x["move1h"]:+.1f}%
-4H: {x["move4h"]:+.1f}%
-24H: {x["move24"]:+.1f}%
+📉 HAREKET
+15M: {x["p15"]:+.1f}%
+1H: {x["p1"]:+.1f}%
+4H: {x["p4"]:+.1f}%
+24H: {x["p24"]:+.1f}%
+
+📦 4H SIKIŞMA
+{x["width"]:.1f}%
+
+🎯 DİRENÇ MESAFESİ
+{x["resistance_distance"]:.1f}%
 
 🎯 GİRİŞ
 {x["entry_low"]:.8g}
 →
 {x["entry_high"]:.8g}
 
-🎯 TP1
+🥇 TP1
 {x["tp1"]:.8g}
 
-🎯 TP2
+🥈 TP2
 {x["tp2"]:.8g}
 
-🎯 TP3
+🥉 TP3
 {x["tp3"]:.8g}
 
-🛑 Teknik stop:
+🛑 STOP
 {x["stop"]:.8g}
 
-🔎 Yapı:
-{reasons}
+<b>🔎 NEDEN?</b>
+{reason_text}
 
-⚠️ Bu sinyal pump garantisi değildir.
-Amaç: hareketin erken aşamasını yakalamaktır.
+⚠️ Otomatik teknik taramadır.
+Pump garantisi değildir.
 """
 
-    telegram(
-        message
-    )
+    telegram(message)
 
 
 # ============================================================
@@ -1109,22 +991,22 @@ def scan():
     if not symbols:
 
         print(
-            "❌ Futures sembolleri alınamadı."
+            "❌ Futures listesi alınamadı."
         )
 
         return
 
-    results = []
-
     print(
-        f"\n🔍 {len(symbols)} Futures taranıyor..."
+        f"🔎 {len(symbols)} Futures taranıyor..."
     )
+
+    results = []
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = {
+        jobs = {
             executor.submit(
                 analyze,
                 symbol
@@ -1133,76 +1015,65 @@ def scan():
             for symbol in symbols
         }
 
-        for future in as_completed(
-            futures
-        ):
+        for job in as_completed(jobs):
 
             try:
 
-                result = future.result()
+                result = job.result()
 
                 if result:
                     results.append(result)
 
-            except Exception:
+            except:
                 pass
-
-    # ========================================================
-    # SCORE SIRALAMA
-    # ========================================================
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # ========================================================
-    # SADECE EN İYİLER
-    # ========================================================
-
-    selected = results[
-        :MAX_ALERTS
-    ]
-
     print(
         f"🔥 Uygun aday: {len(results)}"
     )
 
-    for x in selected:
+    for x in results[:MAX_ALERTS]:
 
         print(
             x["symbol"],
-            x["score"],
-            x["price"]
+            x["score"]
         )
 
-        send_alert(
-            x
-        )
+        send_alert(x)
 
 
 # ============================================================
-# MAIN LOOP
+# MAIN
 # ============================================================
 
 def main():
 
-    print(
-        """
+    print("""
 =========================================
-🚀 MEXC LSK-PRE-PUMP RADAR V1
+🚀 MEXC PUMP RADAR V2
 =========================================
 
-15M + 1H + 4H
-RSI + HACİM + MA + MOMENTUM
-SIKIŞMA + BREAKOUT
-EARLY PUMP DETECTION
+LSK ÖNCESİ HAREKET RADARI
 
-Sadece USDT Futures
+4H SIKIŞMA
++
+HACİM GİRİŞİ
++
+DİRENÇ
++
+HIGHER LOW
++
+MOMENTUM
++
+RSI TEYİDİ
 
+SADECE USDT FUTURES
 =========================================
-"""
-    )
+""")
 
     while True:
 
@@ -1213,12 +1084,12 @@ Sadece USDT Futures
         except Exception as e:
 
             print(
-                "SCAN ERROR:",
+                "MAIN ERROR:",
                 e
             )
 
         print(
-            f"\n⏳ {SCAN_SECONDS} saniye bekleniyor..."
+            f"⏳ {SCAN_SECONDS} saniye..."
         )
 
         time.sleep(
@@ -1226,10 +1097,5 @@ Sadece USDT Futures
         )
 
 
-# ============================================================
-# START
-# ============================================================
-
 if __name__ == "__main__":
-
     main()
