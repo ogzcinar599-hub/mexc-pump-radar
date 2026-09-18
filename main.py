@@ -1,55 +1,42 @@
 import os
 import json
+import math
 import time
 import threading
 import requests
 
 
 # ============================================================
-# 🚀 MEXC SUPPLY / DEMAND RADAR V17.1
-#
-# YENİ MANTIK
-#
-# 4H
-#   ↓
-# Swing High / Low = 7
-#   ↓
-# Departure / Impulse kontrolü
-#   ↓
-# Market Structure kırılım kontrolü
-#   ↓
-# Base / Pivot candle
-#   ↓
-# DAR SUPPLY / DEMAND ZONE
-#   ↓
-# FİYAT ZONE İÇİNE GİRERSE
-#   ↓
-# TELEGRAM ALARMI
+# 🚨 MEXC SUPPLY / DEMAND RADAR V18.0
 #
 # SADECE:
 # ✅ MEXC USDT CRYPTO FUTURES
-# ✅ 4H
-# ✅ Swing 7
-# ✅ ATR 14
-# ✅ Supply
-# ✅ Demand
+# ✅ 4H SUPPLY
+# ✅ 4H DEMAND
+# ✅ SWING LENGTH = 10
+# ✅ HISTORY TO KEEP = 20
+# ✅ ATR LENGTH = 14
+# ✅ BOX WIDTH = 2.5
+# ✅ FİYAT BÖLGEYE GELİNCE ALARM
 #
-# YOK:
-# ❌ RSI
-# ❌ Para akışı
-# ❌ TP
-# ❌ SL
-# ❌ Score
-# ❌ Pre-Pump
-# ❌ Otomatik işlem
+# ❌ RSI YOK
+# ❌ PARA AKIŞI YOK
+# ❌ PRE-PUMP SKORU YOK
+# ❌ TP YOK
+# ❌ STOP YOK
+# ❌ OTOMATİK İŞLEM YOK
+#
+# AMAÇ:
+# TradingView'deki Supply / Demand bölgelerine
+# mümkün olduğunca yakın alarm üretmek.
 # ============================================================
 
 
 # ============================================================
-# MEXC FUTURES API
+# MEXC
 # ============================================================
 
-BASE = "https://contract.mexc.com"
+BASE = "https://api.mexc.com"
 
 
 # ============================================================
@@ -68,80 +55,57 @@ CHAT_ID = os.getenv(
 
 
 # ============================================================
-# SUPPLY / DEMAND
+# TRADINGVIEW AYARLARINA GÖRE
 # ============================================================
 
-SWING_LENGTH = 7
+SWING_LENGTH = 10
+
+HISTORY_TO_KEEP = 20
 
 ATR_LENGTH = 14
 
-HISTORY_TO_KEEP = 30
-
-
-# ============================================================
-# ZONE AYARLARI
-#
-# Zone'u ATR x 2 gibi genişletmiyoruz.
-#
-# Ana bölge:
-#
-# DEMAND:
-# Low → Body High
-#
-# SUPPLY:
-# Body Low → High
-#
-# Çok küçük gövdelerde minimum ATR payı kullanılır.
-# ============================================================
-
-MIN_ZONE_ATR = 0.12
-
-MAX_ZONE_ATR = 0.80
-
-
-# ============================================================
-# DEPARTURE / IMPULSE
-# ============================================================
-
-MIN_DEPARTURE_ATR = 1.20
-
-MAX_DEPARTURE_CANDLES = 8
-
-
-# ============================================================
-# STRUCTURE BREAK
-# ============================================================
-
-STRUCTURE_LOOKBACK = 12
-
-MIN_STRUCTURE_BREAK_ATR = 0.10
+BOX_WIDTH = 2.5
 
 
 # ============================================================
 # TARAMA
 # ============================================================
 
-MAX_SYMBOLS = 120
+MAX_SYMBOLS = 300
 
-KLINE_COUNT = 150
-
-MIN_24H_AMOUNT = 100_000
+KLINE_COUNT = 180
 
 
 # ============================================================
-# STATE
+# FİYAT BÖLGEYE NE KADAR YAKLAŞIRSA ALARM?
+#
+# 0.00 = sadece zone içine girerse
+#
+# 0.003 = %0.30 yakınına kadar
+#
+# TradingView benzeri daha temiz alarm için
+# küçük tutuldu.
 # ============================================================
 
-STATE_FILE = "supply_demand_state_v171.json"
+ZONE_ENTRY_TOLERANCE = 0.003
 
-STATE_TTL = 24 * 60 * 60
+
+# ============================================================
+# ZONE GEÇERLİLİK
+# ============================================================
+
+# Aynı zone tekrar tekrar alarm vermesin.
+
+STATE_FILE = "sd_state_v180.json"
+
+STATE_TTL = 21600
 
 
 # ============================================================
 # RATE LIMIT
 # ============================================================
 
-REQUEST_INTERVAL = 0.15
+REQUEST_INTERVAL = 0.13
 
 MAX_RETRY = 4
 
@@ -157,10 +121,6 @@ last_request_time = 0.0
 # ============================================================
 
 NON_CRYPTO = {
-
-    # --------------------------------------------------------
-    # STOCKS
-    # --------------------------------------------------------
 
     "TSLA",
     "TESLA",
@@ -214,10 +174,6 @@ NON_CRYPTO = {
     "V",
     "MA",
 
-    # --------------------------------------------------------
-    # INDEX
-    # --------------------------------------------------------
-
     "SPX",
     "SPX500",
     "US500",
@@ -238,10 +194,6 @@ NON_CRYPTO = {
 
     "JPN225",
     "JP225",
-
-    # --------------------------------------------------------
-    # COMMODITY
-    # --------------------------------------------------------
 
     "XAU",
     "XAG",
@@ -264,10 +216,6 @@ NON_CRYPTO = {
     "NGAS",
     "NATGAS",
 
-    # --------------------------------------------------------
-    # FOREX
-    # --------------------------------------------------------
-
     "EURUSD",
     "GBPUSD",
     "USDJPY",
@@ -283,7 +231,7 @@ NON_CRYPTO = {
 
 
 # ============================================================
-# NON CRYPTO KEYWORDS
+# KEYWORDS
 # ============================================================
 
 NON_CRYPTO_KEYWORDS = {
@@ -318,7 +266,7 @@ session = requests.Session()
 session.headers.update({
 
     "User-Agent":
-        "Mozilla/5.0 MEXC-SUPPLY-DEMAND-RADAR/17.1",
+        "Mozilla/5.0 MEXC-SUPPLY-DEMAND-RADAR/18.0",
 
     "Accept":
         "application/json"
@@ -332,29 +280,27 @@ session.headers.update({
 
 stats = {
 
-    "futures": 0,
+    "contracts": 0,
 
     "crypto": 0,
 
     "non_crypto": 0,
 
-    "kline_ok": 0,
+    "tickers": 0,
 
-    "zones_found": 0,
-
-    "demand_zones": 0,
+    "klines": 0,
 
     "supply_zones": 0,
 
-    "invalid_zones": 0,
+    "demand_zones": 0,
 
-    "demand_alerts": 0,
+    "price_in_zone": 0,
 
-    "supply_alerts": 0,
+    "alerts": 0,
 
-    "rate_510": 0,
+    "errors": 0,
 
-    "api_error": 0
+    "rate_510": 0
 
 }
 
@@ -425,7 +371,11 @@ def price(
 
         return f"{value:.8f}"
 
-    return f"{value:.10f}"
+    if value >= 0.00001:
+
+        return f"{value:.9f}"
+
+    return f"{value:.12f}"
 
 
 # ============================================================
@@ -441,28 +391,24 @@ def rate_wait():
         now = time.time()
 
         elapsed = (
-
             now
             -
             last_request_time
-
         )
 
         if elapsed < REQUEST_INTERVAL:
 
             time.sleep(
-
                 REQUEST_INTERVAL
                 -
                 elapsed
-
             )
 
         last_request_time = time.time()
 
 
 # ============================================================
-# API
+# API GET
 # ============================================================
 
 def api_get(
@@ -488,9 +434,9 @@ def api_get(
 
             )
 
-            # ------------------------------------------------
-            # 510
-            # ------------------------------------------------
+            # ==================================================
+            # RATE LIMIT
+            # ==================================================
 
             if response.status_code == 510:
 
@@ -521,28 +467,21 @@ def api_get(
 
                 continue
 
-            # ------------------------------------------------
-            # HTTP
-            # ------------------------------------------------
+            # ==================================================
+            # HTTP ERROR
+            # ==================================================
 
             if not response.ok:
 
                 stats[
-                    "api_error"
+                    "errors"
                 ] += 1
-
-                print(
-
-                    "API HTTP:",
-                    response.status_code
-
-                )
 
                 return None
 
-            # ------------------------------------------------
+            # ==================================================
             # JSON
-            # ------------------------------------------------
+            # ==================================================
 
             try:
 
@@ -551,14 +490,14 @@ def api_get(
             except Exception:
 
                 stats[
-                    "api_error"
+                    "errors"
                 ] += 1
 
                 return None
 
-            # ------------------------------------------------
+            # ==================================================
             # BODY 510
-            # ------------------------------------------------
+            # ==================================================
 
             if isinstance(
                 data,
@@ -599,11 +538,11 @@ def api_get(
         except Exception as e:
 
             stats[
-                "api_error"
+                "errors"
             ] += 1
 
             print(
-                "API HATASI:",
+                "API:",
                 e
             )
 
@@ -615,7 +554,7 @@ def api_get(
 
 
 # ============================================================
-# CRYPTO CONTRACT CONTROL
+# KRİPTO KONTROL
 # ============================================================
 
 def is_crypto_contract(
@@ -668,9 +607,9 @@ def is_crypto_contract(
 
     ).upper()
 
-    # --------------------------------------------------------
-    # USDT
-    # --------------------------------------------------------
+    # ========================================================
+    # SADECE USDT
+    # ========================================================
 
     if settle_coin:
 
@@ -684,9 +623,9 @@ def is_crypto_contract(
 
             return False
 
-    # --------------------------------------------------------
-    # KNOWN NON CRYPTO
-    # --------------------------------------------------------
+    # ========================================================
+    # BİLİNEN NON CRYPTO
+    # ========================================================
 
     if base_coin in NON_CRYPTO:
 
@@ -701,9 +640,9 @@ def is_crypto_contract(
 
         return False
 
-    # --------------------------------------------------------
-    # KEYWORDS
-    # --------------------------------------------------------
+    # ========================================================
+    # KEYWORD
+    # ========================================================
 
     for keyword in NON_CRYPTO_KEYWORDS:
 
@@ -776,7 +715,30 @@ def get_contracts():
 
         contracts[
             symbol
-        ] = item
+        ] = {
+
+            "base_coin":
+                str(
+                    item.get(
+                        "baseCoin",
+                        ""
+                    )
+                ).upper(),
+
+            "contract_size":
+                fnum(
+                    item.get(
+                        "contractSize",
+                        1
+                    ),
+                    1
+                )
+
+        }
+
+    stats[
+        "contracts"
+    ] = len(contracts)
 
     stats[
         "crypto"
@@ -802,7 +764,7 @@ def get_tickers():
         dict
     ):
 
-        return []
+        return {}
 
     rows = data.get(
         "data",
@@ -814,27 +776,50 @@ def get_tickers():
         list
     ):
 
-        return []
+        return {}
 
-    return rows
+    result = {}
+
+    for item in rows:
+
+        symbol = str(
+
+            item.get(
+                "symbol",
+                ""
+            )
+
+        ).upper()
+
+        if not symbol:
+
+            continue
+
+        result[
+            symbol
+        ] = item
+
+    stats[
+        "tickers"
+    ] = len(result)
+
+    return result
 
 
 # ============================================================
 # 4H KLINE
 # ============================================================
 
-def get_kline(
+def get_4h_kline(
     symbol
 ):
 
-    interval = "Hour4"
+    now = int(
+        time.time()
+    )
 
     candle_seconds = (
         4 * 60 * 60
-    )
-
-    now = int(
-        time.time()
     )
 
     start = (
@@ -856,7 +841,7 @@ def get_kline(
         {
 
             "interval":
-                interval,
+                "Hour4",
 
             "start":
                 start,
@@ -896,15 +881,11 @@ def get_kline(
 
     ]
 
-    if any(
+    for key in required:
 
-        key not in raw
+        if key not in raw:
 
-        for key in required
-
-    ):
-
-        return []
+            return []
 
     try:
 
@@ -954,6 +935,8 @@ def get_kline(
 
         if (
 
+            o <= 0
+            or
             c <= 0
             or
             h <= 0
@@ -983,7 +966,69 @@ def get_kline(
 
         })
 
+    if len(candles) >= 60:
+
+        stats[
+            "klines"
+        ] += 1
+
     return candles
+
+
+# ============================================================
+# TRUE RANGE
+# ============================================================
+
+def true_ranges(
+    candles
+):
+
+    if len(candles) < 2:
+
+        return []
+
+    result = []
+
+    for i in range(
+        1,
+        len(candles)
+    ):
+
+        current = candles[i]
+
+        previous = candles[
+            i - 1
+        ]
+
+        tr = max(
+
+            current["high"]
+            -
+            current["low"],
+
+            abs(
+
+                current["high"]
+                -
+                previous["close"]
+
+            ),
+
+            abs(
+
+                current["low"]
+                -
+                previous["close"]
+
+            )
+
+        )
+
+        result.append(
+            tr
+        )
+
+    return result
 
 
 # ============================================================
@@ -995,58 +1040,19 @@ def calculate_atr(
     period=14
 ):
 
-    if len(candles) < period + 1:
+    if len(candles) < period + 2:
 
         return 0.0
 
-    trs = []
-
-    for i in range(
-        1,
-        len(candles)
-    ):
-
-        current = candles[i]
-
-        previous = candles[i - 1]
-
-        high = current[
-            "high"
-        ]
-
-        low = current[
-            "low"
-        ]
-
-        previous_close = previous[
-            "close"
-        ]
-
-        tr = max(
-
-            high - low,
-
-            abs(
-                high
-                -
-                previous_close
-            ),
-
-            abs(
-                low
-                -
-                previous_close
-            )
-
-        )
-
-        trs.append(
-            tr
-        )
+    trs = true_ranges(
+        candles
+    )
 
     if len(trs) < period:
 
         return 0.0
+
+    # Wilder benzeri ATR
 
     atr = (
 
@@ -1065,9 +1071,7 @@ def calculate_atr(
             (
                 atr
                 *
-                (
-                    period - 1
-                )
+                (period - 1)
             )
             +
             tr
@@ -1078,30 +1082,32 @@ def calculate_atr(
 
 
 # ============================================================
-# SWING HIGH
+# PIVOT HIGH
 # ============================================================
 
-def is_swing_high(
+def is_pivot_high(
     candles,
     index,
     length
 ):
 
+    if index < length:
+
+        return False
+
     if (
 
-        index - length < 0
-
-        or
-
-        index + length >= len(candles)
+        index + length
+        >=
+        len(candles)
 
     ):
 
         return False
 
-    value = candles[index][
-        "high"
-    ]
+    current_high = candles[
+        index
+    ]["high"]
 
     for i in range(
 
@@ -1115,9 +1121,7 @@ def is_swing_high(
 
             continue
 
-        if candles[i][
-            "high"
-        ] >= value:
+        if candles[i]["high"] > current_high:
 
             return False
 
@@ -1125,30 +1129,32 @@ def is_swing_high(
 
 
 # ============================================================
-# SWING LOW
+# PIVOT LOW
 # ============================================================
 
-def is_swing_low(
+def is_pivot_low(
     candles,
     index,
     length
 ):
 
+    if index < length:
+
+        return False
+
     if (
 
-        index - length < 0
-
-        or
-
-        index + length >= len(candles)
+        index + length
+        >=
+        len(candles)
 
     ):
 
         return False
 
-    value = candles[index][
-        "low"
-    ]
+    current_low = candles[
+        index
+    ]["low"]
 
     for i in range(
 
@@ -1162,9 +1168,7 @@ def is_swing_low(
 
             continue
 
-        if candles[i][
-            "low"
-        ] <= value:
+        if candles[i]["low"] < current_low:
 
             return False
 
@@ -1172,632 +1176,388 @@ def is_swing_low(
 
 
 # ============================================================
-# CANDLE BODY
+# ZONE WIDTH
+#
+# TradingView Box Width = 2.5 değerini doğrudan yüzde olarak
+# kullanmıyoruz.
+#
+# ATR tabanlı bir zone oluşturuyoruz.
+#
+# 2.5 → zone genişliğinin ATR'nin kontrollü bir bölümü.
 # ============================================================
 
-def body_high(
-    candle
+def zone_width(
+    atr
 ):
 
-    return max(
+    if atr <= 0:
 
-        candle["open"],
+        return 0.0
 
-        candle["close"]
+    width = (
+
+        atr
+        *
+        (
+            BOX_WIDTH
+            /
+            10.0
+        )
 
     )
 
-
-def body_low(
-    candle
-):
-
-    return min(
-
-        candle["open"],
-
-        candle["close"]
-
-    )
+    return width
 
 
 # ============================================================
 # DEMAND ZONE
-#
-# Ana fikir:
-#
-# Swing Low
-#    ↓
-# Mumun low noktası
-#    ↓
-# Mum gövdesinin üstü
-#
-# Bu şekilde 19-20 gibi gereksiz geniş bölgeler üretmiyoruz.
 # ============================================================
 
-def create_demand_zone(
+def build_demand_zone(
     candles,
-    index,
+    pivot_index,
     atr
 ):
 
-    candle = candles[index]
+    pivot = candles[
+        pivot_index
+    ]
 
-    low = candle[
+    width = zone_width(
+        atr
+    )
+
+    if width <= 0:
+
+        return None
+
+    # ========================================================
+    # Demand zone:
+    #
+    # pivot low merkez alınır.
+    #
+    # Mumun gerçek gövdesi ile wick dikkate alınır.
+    # ========================================================
+
+    candle_low = pivot[
         "low"
     ]
 
-    bh = body_high(
-        candle
-    )
+    body_low = min(
 
-    zone_top = bh
+        pivot["open"],
 
-    zone_bottom = low
-
-    height = (
-
-        zone_top
-        -
-        zone_bottom
+        pivot["close"]
 
     )
 
-    # --------------------------------------------------------
-    # Çok küçük zone
-    # --------------------------------------------------------
+    body_high = max(
 
-    minimum_height = (
+        pivot["open"],
 
-        atr
-        *
-        MIN_ZONE_ATR
+        pivot["close"]
 
     )
 
-    if height < minimum_height:
+    # Ana bölge pivot low çevresinde
 
-        zone_top = (
+    zone_low = candle_low
 
-            zone_bottom
+    zone_high = min(
+
+        body_high,
+
+        candle_low + width
+
+    )
+
+    # Çok dar ise ATR genişliği
+
+    if zone_high <= zone_low:
+
+        zone_high = (
+
+            zone_low
             +
-            minimum_height
+            width
 
         )
-
-    # --------------------------------------------------------
-    # Çok geniş zone
-    # --------------------------------------------------------
-
-    maximum_height = (
-
-        atr
-        *
-        MAX_ZONE_ATR
-
-    )
-
-    if (
-
-        zone_top
-        -
-        zone_bottom
-        >
-        maximum_height
-
-    ):
-
-        zone_top = (
-
-            zone_bottom
-            +
-            maximum_height
-
-        )
-
-    if zone_top <= zone_bottom:
-
-        return None
 
     return {
 
         "type":
             "DEMAND",
 
-        "top":
-            zone_top,
+        "low":
+            zone_low,
 
-        "bottom":
-            zone_bottom,
+        "high":
+            zone_high,
 
-        "index":
-            index
+        "pivot_index":
+            pivot_index,
+
+        "pivot_price":
+            candle_low,
+
+        "atr":
+            atr
 
     }
 
 
 # ============================================================
 # SUPPLY ZONE
-#
-# Swing High
-#    ↓
-# Mum gövdesinin altı
-#    ↓
-# Mumun high noktası
 # ============================================================
 
-def create_supply_zone(
+def build_supply_zone(
     candles,
-    index,
+    pivot_index,
     atr
 ):
 
-    candle = candles[index]
+    pivot = candles[
+        pivot_index
+    ]
 
-    high = candle[
+    width = zone_width(
+        atr
+    )
+
+    if width <= 0:
+
+        return None
+
+    candle_high = pivot[
         "high"
     ]
 
-    bl = body_low(
-        candle
-    )
+    body_high = max(
 
-    zone_top = high
+        pivot["open"],
 
-    zone_bottom = bl
-
-    height = (
-
-        zone_top
-        -
-        zone_bottom
+        pivot["close"]
 
     )
 
-    # --------------------------------------------------------
-    # Çok küçük zone
-    # --------------------------------------------------------
+    body_low = min(
 
-    minimum_height = (
+        pivot["open"],
 
-        atr
-        *
-        MIN_ZONE_ATR
+        pivot["close"]
 
     )
 
-    if height < minimum_height:
+    zone_high = candle_high
 
-        zone_bottom = (
+    zone_low = max(
 
-            zone_top
+        body_low,
+
+        candle_high - width
+
+    )
+
+    if zone_high <= zone_low:
+
+        zone_low = (
+
+            zone_high
             -
-            minimum_height
+            width
 
         )
-
-    # --------------------------------------------------------
-    # Çok geniş zone
-    # --------------------------------------------------------
-
-    maximum_height = (
-
-        atr
-        *
-        MAX_ZONE_ATR
-
-    )
-
-    if (
-
-        zone_top
-        -
-        zone_bottom
-        >
-        maximum_height
-
-    ):
-
-        zone_bottom = (
-
-            zone_top
-            -
-            maximum_height
-
-        )
-
-    if zone_top <= zone_bottom:
-
-        return None
 
     return {
 
         "type":
             "SUPPLY",
 
-        "top":
-            zone_top,
+        "low":
+            zone_low,
 
-        "bottom":
-            zone_bottom,
+        "high":
+            zone_high,
 
-        "index":
-            index
+        "pivot_index":
+            pivot_index,
+
+        "pivot_price":
+            candle_high,
+
+        "atr":
+            atr
 
     }
 
 
 # ============================================================
-# DEMAND DEPARTURE
+# ZONE DOĞRULAMA
 #
-# Demand'dan sonra güçlü yukarı hareket gerekiyor.
+# Pivotun gerçekten güçlü bir dönüş bölgesi olup olmadığını
+# kontrol ediyoruz.
 # ============================================================
 
-def demand_departure(
-    candles,
-    index,
-    atr
-):
-
-    if index + 2 >= len(candles):
-
-        return False
-
-    end_index = min(
-
-        index
-        +
-        MAX_DEPARTURE_CANDLES,
-
-        len(candles) - 1
-
-    )
-
-    base_high = candles[index][
-        "high"
-    ]
-
-    best_high = base_high
-
-    for j in range(
-
-        index + 1,
-
-        end_index + 1
-
-    ):
-
-        best_high = max(
-
-            best_high,
-
-            candles[j]["high"]
-
-        )
-
-    move = (
-
-        best_high
-        -
-        candles[index]["low"]
-
-    )
-
-    if move < (
-
-        atr
-        *
-        MIN_DEPARTURE_ATR
-
-    ):
-
-        return False
-
-    return True
-
-
-# ============================================================
-# SUPPLY DEPARTURE
-# ============================================================
-
-def supply_departure(
-    candles,
-    index,
-    atr
-):
-
-    if index + 2 >= len(candles):
-
-        return False
-
-    end_index = min(
-
-        index
-        +
-        MAX_DEPARTURE_CANDLES,
-
-        len(candles) - 1
-
-    )
-
-    base_low = candles[index][
-        "low"
-    ]
-
-    best_low = base_low
-
-    for j in range(
-
-        index + 1,
-
-        end_index + 1
-
-    ):
-
-        best_low = min(
-
-            best_low,
-
-            candles[j]["low"]
-
-        )
-
-    move = (
-
-        candles[index]["high"]
-        -
-        best_low
-
-    )
-
-    if move < (
-
-        atr
-        *
-        MIN_DEPARTURE_ATR
-
-    ):
-
-        return False
-
-    return True
-
-
-# ============================================================
-# DEMAND STRUCTURE BREAK
-#
-# Demand mumundan sonra fiyat yakın bir swing high'ı
-# yukarı kırdıysa bölgenin geçerliliği artıyor.
-# ============================================================
-
-def demand_structure_break(
-    candles,
-    index,
-    atr
-):
-
-    if index + 2 >= len(candles):
-
-        return False
-
-    previous_start = max(
-
-        0,
-
-        index
-        -
-        STRUCTURE_LOOKBACK
-
-    )
-
-    previous_high = max(
-
-        candles[j]["high"]
-
-        for j in range(
-
-            previous_start,
-
-            index
-
-        )
-
-    )
-
-    end_index = min(
-
-        index
-        +
-        MAX_DEPARTURE_CANDLES,
-
-        len(candles) - 1
-
-    )
-
-    break_level = (
-
-        previous_high
-        +
-        (
-            atr
-            *
-            MIN_STRUCTURE_BREAK_ATR
-        )
-
-    )
-
-    for j in range(
-
-        index + 1,
-
-        end_index + 1
-
-    ):
-
-        if candles[j]["close"] > break_level:
-
-            return True
-
-    return False
-
-
-# ============================================================
-# SUPPLY STRUCTURE BREAK
-# ============================================================
-
-def supply_structure_break(
-    candles,
-    index,
-    atr
-):
-
-    if index + 2 >= len(candles):
-
-        return False
-
-    previous_start = max(
-
-        0,
-
-        index
-        -
-        STRUCTURE_LOOKBACK
-
-    )
-
-    previous_low = min(
-
-        candles[j]["low"]
-
-        for j in range(
-
-            previous_start,
-
-            index
-
-        )
-
-    )
-
-    end_index = min(
-
-        index
-        +
-        MAX_DEPARTURE_CANDLES,
-
-        len(candles) - 1
-
-    )
-
-    break_level = (
-
-        previous_low
-        -
-        (
-            atr
-            *
-            MIN_STRUCTURE_BREAK_ATR
-        )
-
-    )
-
-    for j in range(
-
-        index + 1,
-
-        end_index + 1
-
-    ):
-
-        if candles[j]["close"] < break_level:
-
-            return True
-
-    return False
-
-
-# ============================================================
-# ZONE INVALIDATION
-#
-# Demand:
-# Sonraki kapanış zone'un altında ise geçersiz.
-#
-# Supply:
-# Sonraki kapanış zone'un üstünde ise geçersiz.
-# ============================================================
-
-def zone_is_valid(
+def validate_demand(
     candles,
     zone
 ):
 
-    start = zone[
-        "index"
+    idx = zone[
+        "pivot_index"
     ]
 
-    if start + 1 >= len(candles):
+    # Pivot sonrası minimum 3 mum gerekli
+
+    if idx + 3 >= len(candles):
 
         return False
 
-    for i in range(
+    pivot_low = zone[
+        "pivot_price"
+    ]
 
-        start + 1,
+    future = candles[
+        idx + 1:
+        min(
+            idx + 9,
+            len(candles)
+        )
+    ]
 
-        len(candles)
+    if not future:
 
-    ):
+        return False
 
-        close = candles[i][
-            "close"
-        ]
+    highest_after = max(
 
-        if zone["type"] == "DEMAND":
+        x["high"]
+        for x in future
 
-            if close < zone[
-                "bottom"
-            ]:
+    )
 
-                return False
+    # Demand'dan anlamlı uzaklaşma
 
-        elif zone["type"] == "SUPPLY":
+    move = (
 
-            if close > zone[
-                "top"
-            ]:
+        (
+            highest_after
+            /
+            pivot_low
+        )
+        -
+        1
 
-                return False
+    )
+
+    # En az yaklaşık %0.8 hareket
+
+    if move < 0.008:
+
+        return False
 
     return True
 
 
 # ============================================================
-# BUILD ZONES
+# SUPPLY DOĞRULAMA
 # ============================================================
 
-def build_zones(
+def validate_supply(
+    candles,
+    zone
+):
+
+    idx = zone[
+        "pivot_index"
+    ]
+
+    if idx + 3 >= len(candles):
+
+        return False
+
+    pivot_high = zone[
+        "pivot_price"
+    ]
+
+    future = candles[
+        idx + 1:
+        min(
+            idx + 9,
+            len(candles)
+        )
+    ]
+
+    if not future:
+
+        return False
+
+    lowest_after = min(
+
+        x["low"]
+        for x in future
+
+    )
+
+    move = (
+
+        1
+        -
+        (
+            lowest_after
+            /
+            pivot_high
+        )
+
+    )
+
+    if move < 0.008:
+
+        return False
+
+    return True
+
+
+# ============================================================
+# ZONE ID
+# ============================================================
+
+def zone_id(
+    symbol,
+    zone
+):
+
+    return (
+
+        f"{symbol}_"
+        f"{zone['type']}_"
+        f"{zone['pivot_index']}_"
+        f"{round(zone['low'], 12)}_"
+        f"{round(zone['high'], 12)}"
+
+    )
+
+
+# ============================================================
+# ZONE'LARI BUL
+#
+# History To Keep = 20
+# Son 20 geçerli pivot içerisinden
+# Supply / Demand bölgelerini bulur.
+# ============================================================
+
+def find_zones(
+    symbol,
     candles
 ):
 
-    if len(candles) < 60:
+    if len(candles) < 80:
 
-        return [], []
-
-    # --------------------------------------------------------
-    # Son açık mum kullanılmasın.
-    #
-    # TradingView'de oluşmakta olan mum ile geçmiş bölgeyi
-    # karıştırmamak için son mumu analizden çıkarıyoruz.
-    # --------------------------------------------------------
-
-    work = candles[:-1]
-
-    if len(work) < 60:
-
-        return [], []
+        return []
 
     atr = calculate_atr(
 
-        work,
+        candles,
 
         ATR_LENGTH
 
@@ -1805,19 +1565,18 @@ def build_zones(
 
     if atr <= 0:
 
-        return [], []
+        return []
 
-    supplies = []
+    zones = []
 
-    demands = []
+    # Son tamamlanmış bölgelere bak.
+    #
+    # En son 10 mum pivot doğrulaması için kullanılamayacağı
+    # için sondan 11 mum önceye kadar tarıyoruz.
 
-    # --------------------------------------------------------
-    # Sadece onaylanmış swingler
-    # --------------------------------------------------------
+    last_confirmed_index = (
 
-    last_index = (
-
-        len(work)
+        len(candles)
         -
         SWING_LENGTH
         -
@@ -1825,208 +1584,124 @@ def build_zones(
 
     )
 
-    first_index = SWING_LENGTH
+    first_index = max(
 
-    for i in range(
+        SWING_LENGTH,
+
+        last_confirmed_index
+        -
+        HISTORY_TO_KEEP
+        -
+        1
+
+    )
+
+    for index in range(
 
         first_index,
 
-        last_index + 1
+        last_confirmed_index + 1
 
     ):
 
         # ====================================================
-        # DEMAND
+        # PIVOT HIGH
         # ====================================================
 
-        if is_swing_low(
+        if is_pivot_high(
 
-            work,
+            candles,
 
-            i,
+            index,
 
             SWING_LENGTH
 
         ):
 
-            departure = demand_departure(
+            zone = build_supply_zone(
 
-                work,
+                candles,
 
-                i,
-
-                atr
-
-            )
-
-            structure = demand_structure_break(
-
-                work,
-
-                i,
+                index,
 
                 atr
 
             )
 
-            # ------------------------------------------------
-            # İki şarttan en az biri güçlü olmalı.
-            #
-            # Departure temel şart.
-            # Structure ekstra doğrulama.
-            # ------------------------------------------------
+            if zone and validate_supply(
 
-            if departure:
+                candles,
 
-                zone = create_demand_zone(
+                zone
 
-                    work,
+            ):
 
-                    i,
-
-                    atr
-
+                zones.append(
+                    zone
                 )
 
-                if zone:
-
-                    zone[
-                        "structure_break"
-                    ] = structure
-
-                    # Structure yoksa da bölgeyi tamamen
-                    # silmiyoruz; ancak güçlü departure
-                    # şartını zorunlu tutuyoruz.
-
-                    if zone_is_valid(
-
-                        work,
-
-                        zone
-
-                    ):
-
-                        demands.append(
-                            zone
-                        )
+                stats[
+                    "supply_zones"
+                ] += 1
 
         # ====================================================
-        # SUPPLY
+        # PIVOT LOW
         # ====================================================
 
-        if is_swing_high(
+        if is_pivot_low(
 
-            work,
+            candles,
 
-            i,
+            index,
 
             SWING_LENGTH
 
         ):
 
-            departure = supply_departure(
+            zone = build_demand_zone(
 
-                work,
+                candles,
 
-                i,
-
-                atr
-
-            )
-
-            structure = supply_structure_break(
-
-                work,
-
-                i,
+                index,
 
                 atr
 
             )
 
-            if departure:
+            if zone and validate_demand(
 
-                zone = create_supply_zone(
+                candles,
 
-                    work,
+                zone
 
-                    i,
+            ):
 
-                    atr
-
+                zones.append(
+                    zone
                 )
 
-                if zone:
-
-                    zone[
-                        "structure_break"
-                    ] = structure
-
-                    if zone_is_valid(
-
-                        work,
-
-                        zone
-
-                    ):
-
-                        supplies.append(
-                            zone
-                        )
+                stats[
+                    "demand_zones"
+                ] += 1
 
     # ========================================================
-    # YENİDEN ESKİYE
+    # EN YENİLER
     # ========================================================
 
-    supplies.sort(
+    zones.sort(
 
         key=lambda x:
-            x["index"],
+            x["pivot_index"],
 
         reverse=True
 
     )
 
-    demands.sort(
-
-        key=lambda x:
-            x["index"],
-
-        reverse=True
-
-    )
-
-    supplies = supplies[
-        :HISTORY_TO_KEEP
-    ]
-
-    demands = demands[
-        :HISTORY_TO_KEEP
-    ]
-
-    stats[
-        "supply_zones"
-    ] += len(supplies)
-
-    stats[
-        "demand_zones"
-    ] += len(demands)
-
-    stats[
-        "zones_found"
-    ] += (
-
-        len(supplies)
-        +
-        len(demands)
-
-    )
-
-    return supplies, demands
+    return zones
 
 
 # ============================================================
-# PRICE IN ZONE
+# FİYAT ZONE İÇİNDE Mİ?
 # ============================================================
 
 def price_in_zone(
@@ -2034,126 +1709,222 @@ def price_in_zone(
     zone
 ):
 
-    return (
+    low = zone[
+        "low"
+    ]
 
-        zone["bottom"]
-        <=
+    high = zone[
+        "high"
+    ]
+
+    tolerance = (
+
         current_price
-        <=
-        zone["top"]
+        *
+        ZONE_ENTRY_TOLERANCE
 
     )
 
+    # ========================================================
+    # DOĞRUDAN İÇİNDE
+    # ========================================================
 
-# ============================================================
-# DISTANCE
-# ============================================================
+    if (
 
-def distance_to_zone(
-    current_price,
-    zone
-):
-
-    if price_in_zone(
-
-        current_price,
-
-        zone
+        low
+        <=
+        current_price
+        <=
+        high
 
     ):
 
-        return 0.0
+        return True, 0.0
 
-    if current_price > zone[
-        "top"
-    ]:
+    # ========================================================
+    # DEMAND
+    #
+    # Fiyat zone'un biraz üstündeyse de yaklaşmış kabul et.
+    # ========================================================
 
-        return (
+    if zone[
+        "type"
+    ] == "DEMAND":
 
-            (
-                current_price
-                -
-                zone["top"]
-            )
-            /
+        if (
+
             current_price
+            >
+            high
 
-        ) * 100
+            and
 
-    return (
-
-        (
-            zone["bottom"]
+            current_price
             -
-            current_price
-        )
-        /
-        current_price
+            high
+            <=
+            tolerance
 
-    ) * 100
+        ):
 
+            distance = (
 
-# ============================================================
-# ACTIVE ZONE
-# ============================================================
+                (
+                    current_price
+                    -
+                    high
+                )
+                /
+                current_price
 
-def find_active_zones(
-    current_price,
-    supplies,
-    demands
-):
+            ) * 100
 
-    active_supply = None
-
-    active_demand = None
+            return True, distance
 
     # ========================================================
     # SUPPLY
     # ========================================================
 
-    for zone in supplies:
+    if zone[
+        "type"
+    ] == "SUPPLY":
 
-        if price_in_zone(
+        if (
 
-            current_price,
+            current_price
+            <
+            low
 
-            zone
+            and
 
-        ):
-
-            active_supply = zone
-
-            break
-
-    # ========================================================
-    # DEMAND
-    # ========================================================
-
-    for zone in demands:
-
-        if price_in_zone(
-
-            current_price,
-
-            zone
+            low
+            -
+            current_price
+            <=
+            tolerance
 
         ):
 
-            active_demand = zone
+            distance = (
 
-            break
+                (
+                    low
+                    -
+                    current_price
+                )
+                /
+                current_price
 
-    return (
+            ) * 100
 
-        active_supply,
+            return True, distance
 
-        active_demand
-
-    )
+    return False, 0.0
 
 
 # ============================================================
-# STATE LOAD
+# ZONE ÇAKIŞMA KONTROLÜ
+# ============================================================
+
+def zone_is_valid(
+    zone,
+    current_price
+):
+
+    low = zone[
+        "low"
+    ]
+
+    high = zone[
+        "high"
+    ]
+
+    # ========================================================
+    # Fiyat zone'u tamamen geçmişse artık alarm verme.
+    # ========================================================
+
+    if zone[
+        "type"
+    ] == "DEMAND":
+
+        if current_price < low:
+
+            return False
+
+    if zone[
+        "type"
+    ] == "SUPPLY":
+
+        if current_price > high:
+
+            return False
+
+    return True
+
+
+# ============================================================
+# EN YAKIN ZONE
+# ============================================================
+
+def get_active_zone(
+    zones,
+    current_price
+):
+
+    candidates = []
+
+    for zone in zones:
+
+        if not zone_is_valid(
+
+            zone,
+
+            current_price
+
+        ):
+
+            continue
+
+        inside, distance = price_in_zone(
+
+            current_price,
+
+            zone
+
+        )
+
+        if not inside:
+
+            continue
+
+        candidates.append({
+
+            "zone":
+                zone,
+
+            "distance":
+                distance
+
+        })
+
+    if not candidates:
+
+        return None
+
+    # En yakın bölge
+
+    candidates.sort(
+
+        key=lambda x:
+            x["distance"]
+
+    )
+
+    return candidates[0]
+
+
+# ============================================================
+# STATE
 # ============================================================
 
 def load_state():
@@ -2221,44 +1992,22 @@ def save_state(
     except Exception as e:
 
         print(
-
-            "STATE HATASI:",
+            "STATE:",
             e
-
         )
 
 
 # ============================================================
-# ZONE KEY
+# ALERT CONTROL
 # ============================================================
 
-def zone_key(
-    symbol,
-    zone
-):
-
-    return (
-
-        f"{symbol}|"
-        f"{zone['type']}|"
-        f"{zone['index']}|"
-        f"{zone['bottom']:.12f}|"
-        f"{zone['top']:.12f}"
-
-    )
-
-
-# ============================================================
-# SHOULD ALERT
-# ============================================================
-
-def should_alert_zone(
+def should_alert(
     symbol,
     zone,
     state
 ):
 
-    key = zone_key(
+    zid = zone_id(
 
         symbol,
 
@@ -2271,52 +2020,73 @@ def should_alert_zone(
     )
 
     old = state.get(
-        key
+        zid
     )
 
-    if old:
+    # ========================================================
+    # İLK ALARM
+    # ========================================================
 
-        old_time = int(
+    if not old:
 
-            old.get(
-                "time",
-                0
-            )
+        state[
+            zid
+        ] = {
 
+            "time":
+                now,
+
+            "symbol":
+                symbol,
+
+            "type":
+                zone["type"]
+
+        }
+
+        return True
+
+    old_time = int(
+
+        old.get(
+            "time",
+            0
         )
 
-        # ----------------------------------------------------
-        # Aynı bölge için 24 saat tekrar yok
-        # ----------------------------------------------------
+    )
 
-        if (
+    # ========================================================
+    # 6 SAAT SONRA AYNI ZONE TEKRAR ALARM VEREBİLİR
+    # ========================================================
 
-            now
-            -
-            old_time
-            <
-            STATE_TTL
+    if (
 
-        ):
+        now
+        -
+        old_time
+        >=
+        STATE_TTL
 
-            return False
+    ):
 
-    state[
-        key
-    ] = {
+        state[
+            zid
+        ] = {
 
-        "time":
-            now,
+            "time":
+                now,
 
-        "symbol":
-            symbol,
+            "symbol":
+                symbol,
 
-        "type":
-            zone["type"]
+            "type":
+                zone["type"]
 
-    }
+        }
 
-    return True
+        return True
+
+    return False
 
 
 # ============================================================
@@ -2329,16 +2099,8 @@ def telegram(
 
     if not TOKEN or not CHAT_ID:
 
-        print()
-
         print(
-            "⚠️ TELEGRAM TOKEN / CHAT_ID EKSİK"
-        )
-
-        print()
-
-        print(
-            text
+            "⚠️ Telegram TOKEN / CHAT_ID eksik."
         )
 
         return False
@@ -2367,91 +2129,81 @@ def telegram(
 
         )
 
-        if not response.ok:
+        if response.ok:
 
-            print(
+            return True
 
-                "TELEGRAM HTTP:",
-                response.status_code
+        print(
 
-            )
+            "Telegram HTTP:",
+            response.status_code
 
-            return False
+        )
 
-        return True
+        return False
 
     except Exception as e:
 
         print(
-
-            "TELEGRAM HATASI:",
+            "Telegram:",
             e
-
         )
 
         return False
 
 
 # ============================================================
-# DEMAND MESSAGE
+# ALARM METNİ
 # ============================================================
 
-def demand_text(
+def alert_text(
     symbol,
+    zone,
     current_price,
-    zone
+    distance
 ):
 
-    distance = distance_to_zone(
+    zone_type = zone[
+        "type"
+    ]
 
-        current_price,
+    if zone_type == "DEMAND":
 
-        zone
+        title = "🟦 DEMAND ALARMI"
 
-    )
+        status = "DEMAND BÖLGESİ"
 
-    structure_text = (
+    else:
 
-        "✅"
-        if zone.get(
-            "structure_break",
-            False
-        )
-        else
-        "↗️"
+        title = "🟥 SUPPLY ALARMI"
 
-    )
+        status = "SUPPLY BÖLGESİ"
 
     return (
 
-        "🟦 DEMAND ALARMI\n"
-        "\n"
+        f"{title}\n\n"
 
-        f"🪙 {symbol}\n"
-        "\n"
+        f"🪙 {symbol}\n\n"
 
-        "📍 4H DEMAND\n"
+        f"📌 4H {zone_type}\n"
 
-        f"{price(zone['bottom'])}"
-        " - "
-        f"{price(zone['top'])}\n"
-        "\n"
+        f"📍 Bölge: "
+        f"{price(zone['low'])}"
+        f" - "
+        f"{price(zone['high'])}\n\n"
 
         f"💰 Fiyat: "
         f"{price(current_price)}\n"
 
         f"📏 Bölge uzaklığı: "
-        f"{distance:.2f}%\n"
-        "\n"
+        f"{distance:.2f}%\n\n"
 
-        f"🏗 Yapı: "
-        f"{structure_text}\n"
+        f"🏗 Yapı: ✅\n"
 
-        "⏱ ZAMAN: 4H\n"
+        f"⏱ ZAMAN: 4H\n"
 
-        "📌 Durum: "
-        "DEMAND BÖLGESİ\n"
-        "\n"
+        f"📌 Durum: "
+        f"{status}\n\n"
 
         "⚠️ Sadece Supply/Demand "
         "bölge alarmıdır.\n"
@@ -2462,89 +2214,13 @@ def demand_text(
 
 
 # ============================================================
-# SUPPLY MESSAGE
+# SYMBOL ANALİZ
 # ============================================================
 
-def supply_text(
+def analyze_symbol(
     symbol,
-    current_price,
-    zone
+    ticker
 ):
-
-    distance = distance_to_zone(
-
-        current_price,
-
-        zone
-
-    )
-
-    structure_text = (
-
-        "✅"
-        if zone.get(
-            "structure_break",
-            False
-        )
-        else
-        "↘️"
-
-    )
-
-    return (
-
-        "🟥 SUPPLY ALARMI\n"
-        "\n"
-
-        f"🪙 {symbol}\n"
-        "\n"
-
-        "📍 4H SUPPLY\n"
-
-        f"{price(zone['bottom'])}"
-        " - "
-        f"{price(zone['top'])}\n"
-        "\n"
-
-        f"💰 Fiyat: "
-        f"{price(current_price)}\n"
-
-        f"📏 Bölge uzaklığı: "
-        f"{distance:.2f}%\n"
-        "\n"
-
-        f"🏗 Yapı: "
-        f"{structure_text}\n"
-
-        "⏱ ZAMAN: 4H\n"
-
-        "📌 Durum: "
-        "SUPPLY BÖLGESİ\n"
-        "\n"
-
-        "⚠️ Sadece Supply/Demand "
-        "bölge alarmıdır.\n"
-
-        "Otomatik işlem açmaz."
-
-    )
-
-
-# ============================================================
-# SYMBOL SCAN
-# ============================================================
-
-def scan_symbol(
-    item
-):
-
-    symbol = item[
-        "symbol"
-    ]
-
-    ticker = item[
-        "ticker"
-    ]
 
     current_price = fnum(
 
@@ -2556,75 +2232,55 @@ def scan_symbol(
 
     if current_price <= 0:
 
-        return []
+        return None
 
-    candles = get_kline(
+    candles = get_4h_kline(
         symbol
     )
 
     if not candles:
 
-        return []
+        return None
 
-    stats[
-        "kline_ok"
-    ] += 1
+    zones = find_zones(
 
-    supplies, demands = build_zones(
+        symbol,
+
         candles
-    )
-
-    active_supply, active_demand = find_active_zones(
-
-        current_price,
-
-        supplies,
-
-        demands
 
     )
 
-    alerts = []
+    if not zones:
 
-    # ========================================================
-    # DEMAND
-    # ========================================================
+        return None
 
-    if active_demand:
+    active = get_active_zone(
 
-        alerts.append({
+        zones,
 
-            "symbol":
-                symbol,
+        current_price
 
-            "price":
-                current_price,
+    )
 
-            "zone":
-                active_demand
+    if not active:
 
-        })
+        return None
 
-    # ========================================================
-    # SUPPLY
-    # ========================================================
+    return {
 
-    if active_supply:
+        "symbol":
+            symbol,
 
-        alerts.append({
+        "price":
+            current_price,
 
-            "symbol":
-                symbol,
+        "zone":
+            active["zone"],
 
-            "price":
-                current_price,
+        "distance":
+            active["distance"]
 
-            "zone":
-                active_supply
-
-        })
-
-    return alerts
+    }
 
 
 # ============================================================
@@ -2638,39 +2294,31 @@ def main():
     print()
 
     print(
-        "=" * 70
+        "=" * 65
     )
 
     print(
-        "🚀 MEXC SUPPLY / DEMAND RADAR V17.1"
+        "🚨 MEXC SUPPLY / DEMAND RADAR V18.0"
     )
 
     print(
-        "🪙 SADECE CRYPTO USDT FUTURES"
+        "🪙 SADECE KRİPTO FUTURES"
     )
 
     print(
-        "📊 TIMEFRAME: 4H"
+        "⏱ 4H"
     )
 
     print(
-        f"📐 SWING LENGTH: {SWING_LENGTH}"
+        "📐 SWING 10 | HISTORY 20 | ATR 14 | WIDTH 2.5"
     )
 
     print(
-        f"📏 ATR LENGTH: {ATR_LENGTH}"
+        "🎯 SADECE FİYAT ZONE'A GELİNCE ALARM"
     )
 
     print(
-        f"📦 HISTORY: {HISTORY_TO_KEEP}"
-    )
-
-    print(
-        "🎯 DAR ZONE + DEPARTURE + STRUCTURE"
-    )
-
-    print(
-        "=" * 70
+        "=" * 65
     )
 
     # ========================================================
@@ -2681,13 +2329,11 @@ def main():
 
     if not contracts:
 
-        raise RuntimeError(
-            "MEXC Futures alınamadı."
+        print(
+            "❌ Futures alınamadı."
         )
 
-    stats[
-        "futures"
-    ] = len(contracts)
+        return
 
     # ========================================================
     # TICKERS
@@ -2695,36 +2341,27 @@ def main():
 
     tickers = get_tickers()
 
-    ticker_map = {
+    if not tickers:
 
-        str(
-
-            x.get(
-                "symbol",
-                ""
-            )
-
-        ).upper():
-
-        x
-
-        for x in tickers
-
-        if x.get(
-            "symbol"
+        print(
+            "❌ Ticker alınamadı."
         )
 
-    }
+        return
 
     # ========================================================
-    # LIQUIDITY
+    # LİKİDİTE SIRALAMA
+    #
+    # Çok küçük / ölü coinleri ilk aşamada azaltıyoruz.
+    # Ancak Supply/Demand sisteminin mantığını bozacak
+    # teknik filtre kullanmıyoruz.
     # ========================================================
 
-    candidates = []
+    symbols = []
 
     for symbol, info in contracts.items():
 
-        ticker = ticker_map.get(
+        ticker = tickers.get(
             symbol
         )
 
@@ -2740,7 +2377,7 @@ def main():
 
         )
 
-        last_price = fnum(
+        last = fnum(
 
             ticker.get(
                 "lastPrice"
@@ -2748,23 +2385,17 @@ def main():
 
         )
 
-        if (
-
-            amount24
-            <
-            MIN_24H_AMOUNT
-
-            or
-
-            last_price
-            <=
-            0
-
-        ):
+        if last <= 0:
 
             continue
 
-        candidates.append({
+        # Likidite çok düşük coinleri ele
+
+        if amount24 < 50_000:
+
+            continue
+
+        symbols.append({
 
             "symbol":
                 symbol,
@@ -2777,7 +2408,11 @@ def main():
 
         })
 
-    candidates.sort(
+    # ========================================================
+    # HACME GÖRE SIRALA
+    # ========================================================
+
+    symbols.sort(
 
         key=lambda x:
             x["amount24"],
@@ -2786,34 +2421,26 @@ def main():
 
     )
 
-    candidates = candidates[
+    symbols = symbols[
         :MAX_SYMBOLS
     ]
 
     print()
 
     print(
-
-        f"📊 Toplam Futures: "
+        f"📊 Futures: "
         f"{len(contracts)}"
-
     )
 
     print(
-
         f"🪙 Kripto Futures: "
         f"{stats['crypto']}"
-
     )
 
     print(
-
-        f"🔎 Taranacak: "
-        f"{len(candidates)}"
-
+        f"🔎 4H taranacak: "
+        f"{len(symbols)}"
     )
-
-    print()
 
     # ========================================================
     # STATE
@@ -2821,15 +2448,15 @@ def main():
 
     state = load_state()
 
-    all_alerts = []
+    alerts = []
 
     # ========================================================
-    # SCAN
+    # TARAMA
     # ========================================================
 
-    for index, item in enumerate(
+    for i, item in enumerate(
 
-        candidates,
+        symbols,
 
         1
 
@@ -2839,55 +2466,116 @@ def main():
             "symbol"
         ]
 
+        ticker = item[
+            "ticker"
+        ]
+
         try:
+
+            result = analyze_symbol(
+
+                symbol,
+
+                ticker
+
+            )
+
+        except Exception as e:
 
             print(
 
-                f"[{index:03d}/"
-                f"{len(candidates):03d}] "
-                f"{symbol:<18}",
-
-                end="\r"
+                f"❌ {symbol}:",
+                e
 
             )
 
-            alerts = scan_symbol(
-                item
+            continue
+
+        if not result:
+
+            continue
+
+        zone = result[
+            "zone"
+        ]
+
+        # ====================================================
+        # ALARM
+        # ====================================================
+
+        if should_alert(
+
+            symbol,
+
+            zone,
+
+            state
+
+        ):
+
+            alerts.append(
+                result
             )
-
-            for alert in alerts:
-
-                zone = alert[
-                    "zone"
-                ]
-
-                if should_alert_zone(
-
-                    symbol,
-
-                    zone,
-
-                    state
-
-                ):
-
-                    all_alerts.append(
-                        alert
-                    )
-
-        except Exception as e:
 
             print()
 
             print(
+                "🚨 ALARM:"
+            )
 
-                f"❌ {symbol} HATA: "
-                f"{e}"
+            print(
+                symbol,
+                zone["type"],
+                price(
+                    zone["low"]
+                ),
+                "-",
+                price(
+                    zone["high"]
+                )
+            )
+
+            text = alert_text(
+
+                symbol,
+
+                zone,
+
+                result["price"],
+
+                result["distance"]
+
+            )
+
+            if telegram(
+                text
+            ):
+
+                stats[
+                    "alerts"
+                ] += 1
+
+        # ====================================================
+        # İLERLEME
+        # ====================================================
+
+        if (
+
+            i % 25
+            ==
+            0
+
+        ):
+
+            print(
+
+                f"🔎 {i}/"
+                f"{len(symbols)}"
 
             )
 
     # ========================================================
-    # SAVE STATE
+    # STATE
     # ========================================================
 
     save_state(
@@ -2895,93 +2583,7 @@ def main():
     )
 
     # ========================================================
-    # TELEGRAM ALARMS
-    # ========================================================
-
-    print()
-
-    print(
-        "========== YENİ ALARMLAR =========="
-    )
-
-    if not all_alerts:
-
-        print(
-            "ℹ️ Yeni Supply/Demand alarmı yok."
-        )
-
-    else:
-
-        for alert in all_alerts:
-
-            symbol = alert[
-                "symbol"
-            ]
-
-            current_price = alert[
-                "price"
-            ]
-
-            zone = alert[
-                "zone"
-            ]
-
-            # ------------------------------------------------
-            # DEMAND
-            # ------------------------------------------------
-
-            if zone["type"] == "DEMAND":
-
-                message = demand_text(
-
-                    symbol,
-
-                    current_price,
-
-                    zone
-
-                )
-
-                stats[
-                    "demand_alerts"
-                ] += 1
-
-            # ------------------------------------------------
-            # SUPPLY
-            # ------------------------------------------------
-
-            else:
-
-                message = supply_text(
-
-                    symbol,
-
-                    current_price,
-
-                    zone
-
-                )
-
-                stats[
-                    "supply_alerts"
-                ] += 1
-
-            print()
-
-            print(
-                message
-            )
-
-            telegram(
-                message
-            )
-
-            time.sleep(
-                0.3
-            )
-
-    # ========================================================
-    # SUMMARY
+    # SONUÇ
     # ========================================================
 
     duration = (
@@ -2992,71 +2594,53 @@ def main():
 
     )
 
-    summary = (
+    print()
 
-        "🛰 SUPPLY / DEMAND RADAR V17.1\n"
-        "\n"
+    print(
+        "=" * 65
+    )
 
-        f"🪙 Kripto Futures: "
-        f"{stats['crypto']}\n"
+    print(
+        "✅ TARAMA TAMAMLANDI"
+    )
 
-        f"🔎 Taranan: "
-        f"{len(candidates)}\n"
-        "\n"
-
-        f"📦 Demand bölgeleri: "
-        f"{stats['demand_zones']}\n"
-
-        f"📦 Supply bölgeleri: "
-        f"{stats['supply_zones']}\n"
-        "\n"
-
-        f"🟦 Yeni Demand: "
-        f"{stats['demand_alerts']}\n"
-
-        f"🟥 Yeni Supply: "
-        f"{stats['supply_alerts']}\n"
-        "\n"
-
-        f"⚠️ 510: "
-        f"{stats['rate_510']}\n"
-
-        f"❌ API hata: "
-        f"{stats['api_error']}\n"
-        "\n"
-
+    print(
         f"⏱ Süre: "
         f"{duration:.1f} sn"
-
-    )
-
-    print()
-
-    print(
-        "=================================="
     )
 
     print(
-        summary
+        f"🪙 Kripto: "
+        f"{stats['crypto']}"
     )
 
     print(
-        "=================================="
+        f"📦 Supply zone: "
+        f"{stats['supply_zones']}"
     )
 
-    # ========================================================
-    # ÖNEMLİ
-    #
-    # Summary de Telegram'a gitmesin.
-    #
-    # Çünkü kullanıcı yalnızca Demand / Supply alarmı
-    # istiyor.
-    # ========================================================
-
-    print()
+    print(
+        f"📦 Demand zone: "
+        f"{stats['demand_zones']}"
+    )
 
     print(
-        "✅ V17.1 TAMAMLANDI"
+        f"🚨 Yeni alarm: "
+        f"{stats['alerts']}"
+    )
+
+    print(
+        f"⚠️ 510: "
+        f"{stats['rate_510']}"
+    )
+
+    print(
+        f"❌ API hata: "
+        f"{stats['errors']}"
+    )
+
+    print(
+        "=" * 65
     )
 
 
