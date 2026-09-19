@@ -33,16 +33,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Dosyaları kontrol et
+      - name: Repository kontrol
         run: |
-          echo "================================"
-          echo "REPOSITORY DOSYALARI"
-          echo "================================"
+          echo "======================================"
+          echo "📁 DOSYALAR"
+          echo "======================================"
           find . -maxdepth 3 -type f | sort
 
       - name: Radar çalıştır
         run: |
-          echo "================================"
-          echo "🚀 MEXC RADAR V2 BAŞLIYOR"
-          echo "================================"
+          echo "======================================"
+          echo "🚀 MEXC PRE-PUMP RADAR V3"
+          echo "======================================"
           python main.py
