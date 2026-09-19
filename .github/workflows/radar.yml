@@ -4,44 +4,38 @@ on:
   workflow_dispatch:
 
 jobs:
-
   radar:
-
     runs-on: ubuntu-latest
 
     env:
-
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-
       CHAT_ID: ${{ secrets.CHAT_ID }}
 
     steps:
 
       - name: Repository indir
-
         uses: actions/checkout@v4
 
-
       - name: Python kur
-
         uses: actions/setup-python@v5
-
         with:
-
           python-version: "3.11"
 
-
       - name: Requests kur
-
         run: |
-
           python -m pip install --upgrade pip
-
           pip install requests
 
+      - name: Dosyaları kontrol et
+        run: |
+          echo "================================"
+          echo "REPOSITORY DOSYALARI"
+          echo "================================"
+          find . -maxdepth 3 -type f | sort
 
       - name: Radar çalıştır
-
         run: |
-
-          python radar.py
+          echo "================================"
+          echo "🚀 MEXC RADAR BAŞLIYOR"
+          echo "================================"
+          python main.py
