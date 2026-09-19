@@ -15,24 +15,41 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      CHAT_ID: ${{ secrets.CHAT_ID }}
+      # GitHub Secrets
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # Kodun eski isimleri kullanması ihtimaline karşı
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
 
+      # ============================================================
+      # REPOSITORY
+      # ============================================================
       - name: Repository indir
         uses: actions/checkout@v4
 
+      # ============================================================
+      # PYTHON
+      # ============================================================
       - name: Python kur
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ============================================================
+      # GEREKSİNİMLER
+      # ============================================================
       - name: Gereksinimleri kur
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ============================================================
+      # REPOSITORY KONTROL
+      # ============================================================
       - name: Repository kontrol
         run: |
           echo "======================================"
@@ -40,9 +57,46 @@ jobs:
           echo "======================================"
           find . -maxdepth 3 -type f | sort
 
+      # ============================================================
+      # TELEGRAM SECRET KONTROL
+      # ============================================================
+      - name: Telegram Secret kontrol
+        run: |
+          echo "======================================"
+          echo "🔐 TELEGRAM SECRET KONTROL"
+          echo "======================================"
+
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "❌ TELEGRAM_BOT_TOKEN bulunamadı!"
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "❌ TELEGRAM_CHAT_ID bulunamadı!"
+            exit 1
+          fi
+
+          echo "✅ TELEGRAM_BOT_TOKEN bulundu"
+          echo "✅ TELEGRAM_CHAT_ID bulundu"
+          echo "✅ Telegram Secret bağlantısı hazır"
+
+      # ============================================================
+      # RADAR
+      # ============================================================
       - name: Radar çalıştır
         run: |
           echo "======================================"
           echo "🚀 MEXC PRE-PUMP RADAR V3"
           echo "======================================"
+
           python main.py
+
+      # ============================================================
+      # TAMAMLANDI
+      # ============================================================
+      - name: Sonuç
+        if: success()
+        run: |
+          echo "======================================"
+          echo "✅ RADAR BAŞARIYLA TAMAMLANDI"
+          echo "======================================"
