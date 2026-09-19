@@ -2,259 +2,72 @@ import os
 import json
 import math
 import time
-import threading
 import requests
-
-
-# ============================================================
-# 🚨 MEXC SUPPLY / DEMAND RADAR V18.0
-#
-# SADECE:
-# ✅ MEXC USDT CRYPTO FUTURES
-# ✅ 4H SUPPLY
-# ✅ 4H DEMAND
-# ✅ SWING LENGTH = 10
-# ✅ HISTORY TO KEEP = 20
-# ✅ ATR LENGTH = 14
-# ✅ BOX WIDTH = 2.5
-# ✅ FİYAT BÖLGEYE GELİNCE ALARM
-#
-# ❌ RSI YOK
-# ❌ PARA AKIŞI YOK
-# ❌ PRE-PUMP SKORU YOK
-# ❌ TP YOK
-# ❌ STOP YOK
-# ❌ OTOMATİK İŞLEM YOK
-#
-# AMAÇ:
-# TradingView'deki Supply / Demand bölgelerine
-# mümkün olduğunca yakın alarm üretmek.
-# ============================================================
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# MEXC
+# 🚀 MEXC MONEY FLOW + VOLUME + DEMAND/SUPPLY RADAR
 # ============================================================
 
-BASE = "https://api.mexc.com"
-
+BASE_URL = "https://contract.mexc.com"
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-)
-
-CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-)
-
+BOT_TOKEN = os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID", "BURAYA_CHAT_ID")
 
 # ============================================================
-# TRADINGVIEW AYARLARINA GÖRE
+# AYARLAR
 # ============================================================
 
-SWING_LENGTH = 10
+MAX_WORKERS = 12
 
-HISTORY_TO_KEEP = 20
+SCAN_INTERVAL = 60
 
-ATR_LENGTH = 14
+# Minimum 24h USDT hacmi
+MIN_24H_VOLUME = 100000
 
-BOX_WIDTH = 2.5
+# Hacim normalin kaç katı olmalı?
+MIN_VOLUME_RATIO = 1.30
 
+# Para giriş minimum skoru
+MIN_MONEY_SCORE = 55
 
-# ============================================================
-# TARAMA
-# ============================================================
+# Toplam sinyal skoru
+MIN_TOTAL_SCORE = 68
 
-MAX_SYMBOLS = 300
+# RSI
+MIN_RSI_15 = 45
+MAX_RSI_15 = 72
 
-KLINE_COUNT = 180
+MIN_RSI_1H = 45
+MAX_RSI_1H = 72
 
+MIN_RSI_4H = 45
+MAX_RSI_4H = 72
 
-# ============================================================
-# FİYAT BÖLGEYE NE KADAR YAKLAŞIRSA ALARM?
-#
-# 0.00 = sadece zone içine girerse
-#
-# 0.003 = %0.30 yakınına kadar
-#
-# TradingView benzeri daha temiz alarm için
-# küçük tutuldu.
-# ============================================================
+# Son 15 dakikadaki maksimum pump
+MAX_15M_PUMP = 5.0
 
-ZONE_ENTRY_TOLERANCE = 0.003
+# Son 1 saatte maksimum pump
+MAX_1H_PUMP = 8.0
 
+# Aynı coine tekrar alarm vermeme
+COOLDOWN_HOURS = 4
 
-# ============================================================
-# ZONE GEÇERLİLİK
-# ============================================================
+# Telegram'da tek taramada maksimum alarm
+MAX_ALERTS = 8
 
-# Aynı zone tekrar tekrar alarm vermesin.
-
-STATE_FILE = "sd_state_v180.json"
-
-STATE_TTL = 21600
-
+# Kaç işlem incelenecek
+DEALS_LIMIT = 100
 
 # ============================================================
-# RATE LIMIT
+# DOSYA
 # ============================================================
 
-REQUEST_INTERVAL = 0.13
-
-MAX_RETRY = 4
-
-BACKOFF_BASE = 1.0
-
-rate_lock = threading.Lock()
-
-last_request_time = 0.0
-
-
-# ============================================================
-# NON CRYPTO
-# ============================================================
-
-NON_CRYPTO = {
-
-    "TSLA",
-    "TESLA",
-
-    "AAPL",
-    "APPLE",
-
-    "NVDA",
-    "NVIDIA",
-
-    "MSFT",
-    "MICROSOFT",
-
-    "AMZN",
-    "AMAZON",
-
-    "GOOGL",
-    "GOOG",
-    "GOOGLE",
-
-    "META",
-
-    "MSTR",
-    "MICROSTRATEGY",
-
-    "COIN",
-    "COINBASE",
-
-    "AMD",
-    "INTC",
-    "NFLX",
-    "PLTR",
-    "BABA",
-    "JPM",
-    "BAC",
-    "WMT",
-    "DIS",
-    "NKE",
-    "PFE",
-    "XOM",
-    "CVX",
-    "BA",
-    "ORCL",
-    "CRM",
-    "AVGO",
-    "QCOM",
-    "UBER",
-    "PYPL",
-    "SHOP",
-    "T",
-    "V",
-    "MA",
-
-    "SPX",
-    "SPX500",
-    "US500",
-
-    "NAS100",
-    "NASDAQ",
-    "NDX",
-
-    "US30",
-    "DJI",
-    "DOW",
-
-    "DAX",
-    "GER40",
-
-    "UK100",
-    "FTSE",
-
-    "JPN225",
-    "JP225",
-
-    "XAU",
-    "XAG",
-    "XPT",
-    "XPD",
-
-    "GOLD",
-    "SILVER",
-    "PLATINUM",
-
-    "COPPER",
-
-    "WTI",
-    "USOIL",
-    "OIL",
-
-    "BRENT",
-    "UKOIL",
-
-    "NGAS",
-    "NATGAS",
-
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
-    "USDCHF",
-    "AUDUSD",
-    "USDCAD",
-    "NZDUSD",
-
-    "EURGBP",
-    "EURJPY",
-    "GBPJPY"
-}
-
-
-# ============================================================
-# KEYWORDS
-# ============================================================
-
-NON_CRYPTO_KEYWORDS = {
-
-    "STOCK",
-    "SHARE",
-    "INDEX",
-    "NASDAQ",
-    "NYSE",
-    "FOREX",
-    "GOLD",
-    "SILVER",
-    "OIL",
-    "CRUDE",
-    "COPPER",
-    "TESLA",
-    "APPLE",
-    "NVIDIA",
-    "MICROSOFT",
-    "AMAZON",
-    "META",
-    "GOOGLE"
-}
+STATE_FILE = "money_flow_state.json"
 
 
 # ============================================================
@@ -264,1663 +77,31 @@ NON_CRYPTO_KEYWORDS = {
 session = requests.Session()
 
 session.headers.update({
-
-    "User-Agent":
-        "Mozilla/5.0 MEXC-SUPPLY-DEMAND-RADAR/18.0",
-
-    "Accept":
-        "application/json"
-
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
 })
 
 
 # ============================================================
-# STATS
+# GENEL REQUEST
 # ============================================================
 
-stats = {
-
-    "contracts": 0,
-
-    "crypto": 0,
-
-    "non_crypto": 0,
-
-    "tickers": 0,
-
-    "klines": 0,
-
-    "supply_zones": 0,
-
-    "demand_zones": 0,
-
-    "price_in_zone": 0,
-
-    "alerts": 0,
-
-    "errors": 0,
-
-    "rate_510": 0
-
-}
-
-
-# ============================================================
-# NUMBER
-# ============================================================
-
-def fnum(
-    value,
-    default=0.0
-):
+def get_json(url, params=None, timeout=10):
 
     try:
+        r = session.get(
+            url,
+            params=params,
+            timeout=timeout
+        )
 
-        return float(value)
+        if r.status_code != 200:
+            return None
+
+        return r.json()
 
     except Exception:
-
-        return default
-
-
-# ============================================================
-# CLAMP
-# ============================================================
-
-def clamp(
-    value,
-    low,
-    high
-):
-
-    return max(
-
-        low,
-
-        min(
-            high,
-            value
-        )
-
-    )
-
-
-# ============================================================
-# PRICE
-# ============================================================
-
-def price(
-    value
-):
-
-    value = fnum(value)
-
-    if value >= 1000:
-
-        return f"{value:,.2f}"
-
-    if value >= 1:
-
-        return f"{value:.4f}"
-
-    if value >= 0.01:
-
-        return f"{value:.6f}"
-
-    if value >= 0.0001:
-
-        return f"{value:.8f}"
-
-    if value >= 0.00001:
-
-        return f"{value:.9f}"
-
-    return f"{value:.12f}"
-
-
-# ============================================================
-# RATE LIMIT
-# ============================================================
-
-def rate_wait():
-
-    global last_request_time
-
-    with rate_lock:
-
-        now = time.time()
-
-        elapsed = (
-            now
-            -
-            last_request_time
-        )
-
-        if elapsed < REQUEST_INTERVAL:
-
-            time.sleep(
-                REQUEST_INTERVAL
-                -
-                elapsed
-            )
-
-        last_request_time = time.time()
-
-
-# ============================================================
-# API GET
-# ============================================================
-
-def api_get(
-    url,
-    params=None
-):
-
-    for attempt in range(
-        MAX_RETRY + 1
-    ):
-
-        rate_wait()
-
-        try:
-
-            response = session.get(
-
-                url,
-
-                params=params,
-
-                timeout=15
-
-            )
-
-            # ==================================================
-            # RATE LIMIT
-            # ==================================================
-
-            if response.status_code == 510:
-
-                stats[
-                    "rate_510"
-                ] += 1
-
-                wait_time = (
-
-                    BACKOFF_BASE
-                    *
-                    (
-                        2 ** attempt
-                    )
-
-                )
-
-                print(
-
-                    f"⚠️ 510 | "
-                    f"{wait_time:.1f}s"
-
-                )
-
-                time.sleep(
-                    wait_time
-                )
-
-                continue
-
-            # ==================================================
-            # HTTP ERROR
-            # ==================================================
-
-            if not response.ok:
-
-                stats[
-                    "errors"
-                ] += 1
-
-                return None
-
-            # ==================================================
-            # JSON
-            # ==================================================
-
-            try:
-
-                data = response.json()
-
-            except Exception:
-
-                stats[
-                    "errors"
-                ] += 1
-
-                return None
-
-            # ==================================================
-            # BODY 510
-            # ==================================================
-
-            if isinstance(
-                data,
-                dict
-            ):
-
-                if str(
-
-                    data.get(
-                        "code",
-                        ""
-                    )
-
-                ) == "510":
-
-                    stats[
-                        "rate_510"
-                    ] += 1
-
-                    wait_time = (
-
-                        BACKOFF_BASE
-                        *
-                        (
-                            2 ** attempt
-                        )
-
-                    )
-
-                    time.sleep(
-                        wait_time
-                    )
-
-                    continue
-
-            return data
-
-        except Exception as e:
-
-            stats[
-                "errors"
-            ] += 1
-
-            print(
-                "API:",
-                e
-            )
-
-            time.sleep(
-                0.5
-            )
-
-    return None
-
-
-# ============================================================
-# KRİPTO KONTROL
-# ============================================================
-
-def is_crypto_contract(
-    item
-):
-
-    symbol = str(
-
-        item.get(
-            "symbol",
-            ""
-        )
-
-    ).upper()
-
-    base_coin = str(
-
-        item.get(
-            "baseCoin",
-            ""
-        )
-
-    ).upper()
-
-    quote_coin = str(
-
-        item.get(
-            "quoteCoin",
-            ""
-        )
-
-    ).upper()
-
-    settle_coin = str(
-
-        item.get(
-            "settleCoin",
-            ""
-        )
-
-    ).upper()
-
-    text = (
-
-        symbol
-        +
-        " "
-        +
-        base_coin
-
-    ).upper()
-
-    # ========================================================
-    # SADECE USDT
-    # ========================================================
-
-    if settle_coin:
-
-        if settle_coin != "USDT":
-
-            return False
-
-    if quote_coin:
-
-        if quote_coin != "USDT":
-
-            return False
-
-    # ========================================================
-    # BİLİNEN NON CRYPTO
-    # ========================================================
-
-    if base_coin in NON_CRYPTO:
-
-        return False
-
-    clean_symbol = symbol.replace(
-        "_USDT",
-        ""
-    )
-
-    if clean_symbol in NON_CRYPTO:
-
-        return False
-
-    # ========================================================
-    # KEYWORD
-    # ========================================================
-
-    for keyword in NON_CRYPTO_KEYWORDS:
-
-        if keyword in text:
-
-            return False
-
-    return True
-
-
-# ============================================================
-# CONTRACTS
-# ============================================================
-
-def get_contracts():
-
-    data = api_get(
-
-        f"{BASE}/api/v1/contract/detail"
-
-    )
-
-    if not isinstance(
-        data,
-        dict
-    ):
-
-        return {}
-
-    rows = data.get(
-        "data",
-        []
-    )
-
-    if not isinstance(
-        rows,
-        list
-    ):
-
-        return {}
-
-    contracts = {}
-
-    for item in rows:
-
-        symbol = str(
-
-            item.get(
-                "symbol",
-                ""
-            )
-
-        ).upper()
-
-        if not symbol.endswith(
-            "_USDT"
-        ):
-
-            continue
-
-        if not is_crypto_contract(
-            item
-        ):
-
-            stats[
-                "non_crypto"
-            ] += 1
-
-            continue
-
-        contracts[
-            symbol
-        ] = {
-
-            "base_coin":
-                str(
-                    item.get(
-                        "baseCoin",
-                        ""
-                    )
-                ).upper(),
-
-            "contract_size":
-                fnum(
-                    item.get(
-                        "contractSize",
-                        1
-                    ),
-                    1
-                )
-
-        }
-
-    stats[
-        "contracts"
-    ] = len(contracts)
-
-    stats[
-        "crypto"
-    ] = len(contracts)
-
-    return contracts
-
-
-# ============================================================
-# TICKERS
-# ============================================================
-
-def get_tickers():
-
-    data = api_get(
-
-        f"{BASE}/api/v1/contract/ticker"
-
-    )
-
-    if not isinstance(
-        data,
-        dict
-    ):
-
-        return {}
-
-    rows = data.get(
-        "data",
-        []
-    )
-
-    if not isinstance(
-        rows,
-        list
-    ):
-
-        return {}
-
-    result = {}
-
-    for item in rows:
-
-        symbol = str(
-
-            item.get(
-                "symbol",
-                ""
-            )
-
-        ).upper()
-
-        if not symbol:
-
-            continue
-
-        result[
-            symbol
-        ] = item
-
-    stats[
-        "tickers"
-    ] = len(result)
-
-    return result
-
-
-# ============================================================
-# 4H KLINE
-# ============================================================
-
-def get_4h_kline(
-    symbol
-):
-
-    now = int(
-        time.time()
-    )
-
-    candle_seconds = (
-        4 * 60 * 60
-    )
-
-    start = (
-
-        now
-        -
-        (
-            KLINE_COUNT
-            *
-            candle_seconds
-        )
-
-    )
-
-    data = api_get(
-
-        f"{BASE}/api/v1/contract/kline/{symbol}",
-
-        {
-
-            "interval":
-                "Hour4",
-
-            "start":
-                start,
-
-            "end":
-                now
-
-        }
-
-    )
-
-    if not isinstance(
-        data,
-        dict
-    ):
-
-        return []
-
-    raw = data.get(
-        "data"
-    )
-
-    if not isinstance(
-        raw,
-        dict
-    ):
-
-        return []
-
-    required = [
-
-        "open",
-        "close",
-        "high",
-        "low",
-        "vol"
-
-    ]
-
-    for key in required:
-
-        if key not in raw:
-
-            return []
-
-    try:
-
-        count = min(
-
-            len(
-                raw[key]
-            )
-
-            for key in required
-
-        )
-
-    except Exception:
-
-        return []
-
-    if count < 60:
-
-        return []
-
-    candles = []
-
-    for i in range(
-        count
-    ):
-
-        o = fnum(
-            raw["open"][i]
-        )
-
-        c = fnum(
-            raw["close"][i]
-        )
-
-        h = fnum(
-            raw["high"][i]
-        )
-
-        l = fnum(
-            raw["low"][i]
-        )
-
-        v = fnum(
-            raw["vol"][i]
-        )
-
-        if (
-
-            o <= 0
-            or
-            c <= 0
-            or
-            h <= 0
-            or
-            l <= 0
-
-        ):
-
-            continue
-
-        candles.append({
-
-            "open":
-                o,
-
-            "close":
-                c,
-
-            "high":
-                h,
-
-            "low":
-                l,
-
-            "vol":
-                v
-
-        })
-
-    if len(candles) >= 60:
-
-        stats[
-            "klines"
-        ] += 1
-
-    return candles
-
-
-# ============================================================
-# TRUE RANGE
-# ============================================================
-
-def true_ranges(
-    candles
-):
-
-    if len(candles) < 2:
-
-        return []
-
-    result = []
-
-    for i in range(
-        1,
-        len(candles)
-    ):
-
-        current = candles[i]
-
-        previous = candles[
-            i - 1
-        ]
-
-        tr = max(
-
-            current["high"]
-            -
-            current["low"],
-
-            abs(
-
-                current["high"]
-                -
-                previous["close"]
-
-            ),
-
-            abs(
-
-                current["low"]
-                -
-                previous["close"]
-
-            )
-
-        )
-
-        result.append(
-            tr
-        )
-
-    return result
-
-
-# ============================================================
-# ATR
-# ============================================================
-
-def calculate_atr(
-    candles,
-    period=14
-):
-
-    if len(candles) < period + 2:
-
-        return 0.0
-
-    trs = true_ranges(
-        candles
-    )
-
-    if len(trs) < period:
-
-        return 0.0
-
-    # Wilder benzeri ATR
-
-    atr = (
-
-        sum(
-            trs[:period]
-        )
-        /
-        period
-
-    )
-
-    for tr in trs[period:]:
-
-        atr = (
-
-            (
-                atr
-                *
-                (period - 1)
-            )
-            +
-            tr
-
-        ) / period
-
-    return atr
-
-
-# ============================================================
-# PIVOT HIGH
-# ============================================================
-
-def is_pivot_high(
-    candles,
-    index,
-    length
-):
-
-    if index < length:
-
-        return False
-
-    if (
-
-        index + length
-        >=
-        len(candles)
-
-    ):
-
-        return False
-
-    current_high = candles[
-        index
-    ]["high"]
-
-    for i in range(
-
-        index - length,
-
-        index + length + 1
-
-    ):
-
-        if i == index:
-
-            continue
-
-        if candles[i]["high"] > current_high:
-
-            return False
-
-    return True
-
-
-# ============================================================
-# PIVOT LOW
-# ============================================================
-
-def is_pivot_low(
-    candles,
-    index,
-    length
-):
-
-    if index < length:
-
-        return False
-
-    if (
-
-        index + length
-        >=
-        len(candles)
-
-    ):
-
-        return False
-
-    current_low = candles[
-        index
-    ]["low"]
-
-    for i in range(
-
-        index - length,
-
-        index + length + 1
-
-    ):
-
-        if i == index:
-
-            continue
-
-        if candles[i]["low"] < current_low:
-
-            return False
-
-    return True
-
-
-# ============================================================
-# ZONE WIDTH
-#
-# TradingView Box Width = 2.5 değerini doğrudan yüzde olarak
-# kullanmıyoruz.
-#
-# ATR tabanlı bir zone oluşturuyoruz.
-#
-# 2.5 → zone genişliğinin ATR'nin kontrollü bir bölümü.
-# ============================================================
-
-def zone_width(
-    atr
-):
-
-    if atr <= 0:
-
-        return 0.0
-
-    width = (
-
-        atr
-        *
-        (
-            BOX_WIDTH
-            /
-            10.0
-        )
-
-    )
-
-    return width
-
-
-# ============================================================
-# DEMAND ZONE
-# ============================================================
-
-def build_demand_zone(
-    candles,
-    pivot_index,
-    atr
-):
-
-    pivot = candles[
-        pivot_index
-    ]
-
-    width = zone_width(
-        atr
-    )
-
-    if width <= 0:
-
         return None
-
-    # ========================================================
-    # Demand zone:
-    #
-    # pivot low merkez alınır.
-    #
-    # Mumun gerçek gövdesi ile wick dikkate alınır.
-    # ========================================================
-
-    candle_low = pivot[
-        "low"
-    ]
-
-    body_low = min(
-
-        pivot["open"],
-
-        pivot["close"]
-
-    )
-
-    body_high = max(
-
-        pivot["open"],
-
-        pivot["close"]
-
-    )
-
-    # Ana bölge pivot low çevresinde
-
-    zone_low = candle_low
-
-    zone_high = min(
-
-        body_high,
-
-        candle_low + width
-
-    )
-
-    # Çok dar ise ATR genişliği
-
-    if zone_high <= zone_low:
-
-        zone_high = (
-
-            zone_low
-            +
-            width
-
-        )
-
-    return {
-
-        "type":
-            "DEMAND",
-
-        "low":
-            zone_low,
-
-        "high":
-            zone_high,
-
-        "pivot_index":
-            pivot_index,
-
-        "pivot_price":
-            candle_low,
-
-        "atr":
-            atr
-
-    }
-
-
-# ============================================================
-# SUPPLY ZONE
-# ============================================================
-
-def build_supply_zone(
-    candles,
-    pivot_index,
-    atr
-):
-
-    pivot = candles[
-        pivot_index
-    ]
-
-    width = zone_width(
-        atr
-    )
-
-    if width <= 0:
-
-        return None
-
-    candle_high = pivot[
-        "high"
-    ]
-
-    body_high = max(
-
-        pivot["open"],
-
-        pivot["close"]
-
-    )
-
-    body_low = min(
-
-        pivot["open"],
-
-        pivot["close"]
-
-    )
-
-    zone_high = candle_high
-
-    zone_low = max(
-
-        body_low,
-
-        candle_high - width
-
-    )
-
-    if zone_high <= zone_low:
-
-        zone_low = (
-
-            zone_high
-            -
-            width
-
-        )
-
-    return {
-
-        "type":
-            "SUPPLY",
-
-        "low":
-            zone_low,
-
-        "high":
-            zone_high,
-
-        "pivot_index":
-            pivot_index,
-
-        "pivot_price":
-            candle_high,
-
-        "atr":
-            atr
-
-    }
-
-
-# ============================================================
-# ZONE DOĞRULAMA
-#
-# Pivotun gerçekten güçlü bir dönüş bölgesi olup olmadığını
-# kontrol ediyoruz.
-# ============================================================
-
-def validate_demand(
-    candles,
-    zone
-):
-
-    idx = zone[
-        "pivot_index"
-    ]
-
-    # Pivot sonrası minimum 3 mum gerekli
-
-    if idx + 3 >= len(candles):
-
-        return False
-
-    pivot_low = zone[
-        "pivot_price"
-    ]
-
-    future = candles[
-        idx + 1:
-        min(
-            idx + 9,
-            len(candles)
-        )
-    ]
-
-    if not future:
-
-        return False
-
-    highest_after = max(
-
-        x["high"]
-        for x in future
-
-    )
-
-    # Demand'dan anlamlı uzaklaşma
-
-    move = (
-
-        (
-            highest_after
-            /
-            pivot_low
-        )
-        -
-        1
-
-    )
-
-    # En az yaklaşık %0.8 hareket
-
-    if move < 0.008:
-
-        return False
-
-    return True
-
-
-# ============================================================
-# SUPPLY DOĞRULAMA
-# ============================================================
-
-def validate_supply(
-    candles,
-    zone
-):
-
-    idx = zone[
-        "pivot_index"
-    ]
-
-    if idx + 3 >= len(candles):
-
-        return False
-
-    pivot_high = zone[
-        "pivot_price"
-    ]
-
-    future = candles[
-        idx + 1:
-        min(
-            idx + 9,
-            len(candles)
-        )
-    ]
-
-    if not future:
-
-        return False
-
-    lowest_after = min(
-
-        x["low"]
-        for x in future
-
-    )
-
-    move = (
-
-        1
-        -
-        (
-            lowest_after
-            /
-            pivot_high
-        )
-
-    )
-
-    if move < 0.008:
-
-        return False
-
-    return True
-
-
-# ============================================================
-# ZONE ID
-# ============================================================
-
-def zone_id(
-    symbol,
-    zone
-):
-
-    return (
-
-        f"{symbol}_"
-        f"{zone['type']}_"
-        f"{zone['pivot_index']}_"
-        f"{round(zone['low'], 12)}_"
-        f"{round(zone['high'], 12)}"
-
-    )
-
-
-# ============================================================
-# ZONE'LARI BUL
-#
-# History To Keep = 20
-# Son 20 geçerli pivot içerisinden
-# Supply / Demand bölgelerini bulur.
-# ============================================================
-
-def find_zones(
-    symbol,
-    candles
-):
-
-    if len(candles) < 80:
-
-        return []
-
-    atr = calculate_atr(
-
-        candles,
-
-        ATR_LENGTH
-
-    )
-
-    if atr <= 0:
-
-        return []
-
-    zones = []
-
-    # Son tamamlanmış bölgelere bak.
-    #
-    # En son 10 mum pivot doğrulaması için kullanılamayacağı
-    # için sondan 11 mum önceye kadar tarıyoruz.
-
-    last_confirmed_index = (
-
-        len(candles)
-        -
-        SWING_LENGTH
-        -
-        1
-
-    )
-
-    first_index = max(
-
-        SWING_LENGTH,
-
-        last_confirmed_index
-        -
-        HISTORY_TO_KEEP
-        -
-        1
-
-    )
-
-    for index in range(
-
-        first_index,
-
-        last_confirmed_index + 1
-
-    ):
-
-        # ====================================================
-        # PIVOT HIGH
-        # ====================================================
-
-        if is_pivot_high(
-
-            candles,
-
-            index,
-
-            SWING_LENGTH
-
-        ):
-
-            zone = build_supply_zone(
-
-                candles,
-
-                index,
-
-                atr
-
-            )
-
-            if zone and validate_supply(
-
-                candles,
-
-                zone
-
-            ):
-
-                zones.append(
-                    zone
-                )
-
-                stats[
-                    "supply_zones"
-                ] += 1
-
-        # ====================================================
-        # PIVOT LOW
-        # ====================================================
-
-        if is_pivot_low(
-
-            candles,
-
-            index,
-
-            SWING_LENGTH
-
-        ):
-
-            zone = build_demand_zone(
-
-                candles,
-
-                index,
-
-                atr
-
-            )
-
-            if zone and validate_demand(
-
-                candles,
-
-                zone
-
-            ):
-
-                zones.append(
-                    zone
-                )
-
-                stats[
-                    "demand_zones"
-                ] += 1
-
-    # ========================================================
-    # EN YENİLER
-    # ========================================================
-
-    zones.sort(
-
-        key=lambda x:
-            x["pivot_index"],
-
-        reverse=True
-
-    )
-
-    return zones
-
-
-# ============================================================
-# FİYAT ZONE İÇİNDE Mİ?
-# ============================================================
-
-def price_in_zone(
-    current_price,
-    zone
-):
-
-    low = zone[
-        "low"
-    ]
-
-    high = zone[
-        "high"
-    ]
-
-    tolerance = (
-
-        current_price
-        *
-        ZONE_ENTRY_TOLERANCE
-
-    )
-
-    # ========================================================
-    # DOĞRUDAN İÇİNDE
-    # ========================================================
-
-    if (
-
-        low
-        <=
-        current_price
-        <=
-        high
-
-    ):
-
-        return True, 0.0
-
-    # ========================================================
-    # DEMAND
-    #
-    # Fiyat zone'un biraz üstündeyse de yaklaşmış kabul et.
-    # ========================================================
-
-    if zone[
-        "type"
-    ] == "DEMAND":
-
-        if (
-
-            current_price
-            >
-            high
-
-            and
-
-            current_price
-            -
-            high
-            <=
-            tolerance
-
-        ):
-
-            distance = (
-
-                (
-                    current_price
-                    -
-                    high
-                )
-                /
-                current_price
-
-            ) * 100
-
-            return True, distance
-
-    # ========================================================
-    # SUPPLY
-    # ========================================================
-
-    if zone[
-        "type"
-    ] == "SUPPLY":
-
-        if (
-
-            current_price
-            <
-            low
-
-            and
-
-            low
-            -
-            current_price
-            <=
-            tolerance
-
-        ):
-
-            distance = (
-
-                (
-                    low
-                    -
-                    current_price
-                )
-                /
-                current_price
-
-            ) * 100
-
-            return True, distance
-
-    return False, 0.0
-
-
-# ============================================================
-# ZONE ÇAKIŞMA KONTROLÜ
-# ============================================================
-
-def zone_is_valid(
-    zone,
-    current_price
-):
-
-    low = zone[
-        "low"
-    ]
-
-    high = zone[
-        "high"
-    ]
-
-    # ========================================================
-    # Fiyat zone'u tamamen geçmişse artık alarm verme.
-    # ========================================================
-
-    if zone[
-        "type"
-    ] == "DEMAND":
-
-        if current_price < low:
-
-            return False
-
-    if zone[
-        "type"
-    ] == "SUPPLY":
-
-        if current_price > high:
-
-            return False
-
-    return True
-
-
-# ============================================================
-# EN YAKIN ZONE
-# ============================================================
-
-def get_active_zone(
-    zones,
-    current_price
-):
-
-    candidates = []
-
-    for zone in zones:
-
-        if not zone_is_valid(
-
-            zone,
-
-            current_price
-
-        ):
-
-            continue
-
-        inside, distance = price_in_zone(
-
-            current_price,
-
-            zone
-
-        )
-
-        if not inside:
-
-            continue
-
-        candidates.append({
-
-            "zone":
-                zone,
-
-            "distance":
-                distance
-
-        })
-
-    if not candidates:
-
-        return None
-
-    # En yakın bölge
-
-    candidates.sort(
-
-        key=lambda x:
-            x["distance"]
-
-    )
-
-    return candidates[0]
 
 
 # ============================================================
@@ -1931,356 +112,1068 @@ def load_state():
 
     try:
 
+        if not os.path.exists(STATE_FILE):
+            return {}
+
         with open(
-
             STATE_FILE,
-
             "r",
-
             encoding="utf-8"
-
         ) as f:
 
-            data = json.load(f)
-
-        if isinstance(
-            data,
-            dict
-        ):
-
-            return data
+            return json.load(f)
 
     except Exception:
-
-        pass
-
-    return {}
+        return {}
 
 
-# ============================================================
-# STATE SAVE
-# ============================================================
-
-def save_state(
-    state
-):
+def save_state(state):
 
     try:
 
         with open(
-
             STATE_FILE,
-
             "w",
-
             encoding="utf-8"
-
         ) as f:
 
             json.dump(
-
                 state,
-
                 f,
-
-                ensure_ascii=False,
-
                 indent=2
-
             )
 
-    except Exception as e:
-
-        print(
-            "STATE:",
-            e
-        )
+    except Exception:
+        pass
 
 
-# ============================================================
-# ALERT CONTROL
-# ============================================================
-
-def should_alert(
-    symbol,
-    zone,
-    state
-):
-
-    zid = zone_id(
-
-        symbol,
-
-        zone
-
-    )
-
-    now = int(
-        time.time()
-    )
-
-    old = state.get(
-        zid
-    )
-
-    # ========================================================
-    # İLK ALARM
-    # ========================================================
-
-    if not old:
-
-        state[
-            zid
-        ] = {
-
-            "time":
-                now,
-
-            "symbol":
-                symbol,
-
-            "type":
-                zone["type"]
-
-        }
-
-        return True
-
-    old_time = int(
-
-        old.get(
-            "time",
-            0
-        )
-
-    )
-
-    # ========================================================
-    # 6 SAAT SONRA AYNI ZONE TEKRAR ALARM VEREBİLİR
-    # ========================================================
-
-    if (
-
-        now
-        -
-        old_time
-        >=
-        STATE_TTL
-
-    ):
-
-        state[
-            zid
-        ] = {
-
-            "time":
-                now,
-
-            "symbol":
-                symbol,
-
-            "type":
-                zone["type"]
-
-        }
-
-        return True
-
-    return False
+STATE = load_state()
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def telegram(
-    text
-):
+def send_telegram(message):
 
-    if not TOKEN or not CHAT_ID:
+    if (
+        not BOT_TOKEN
+        or BOT_TOKEN == "BURAYA_BOT_TOKEN"
+        or not CHAT_ID
+        or CHAT_ID == "BURAYA_CHAT_ID"
+    ):
+        print(message)
+        return
 
-        print(
-            "⚠️ Telegram TOKEN / CHAT_ID eksik."
-        )
-
-        return False
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{BOT_TOKEN}/sendMessage"
+    )
 
     try:
 
-        response = session.post(
-
-            f"https://api.telegram.org/"
-            f"bot{TOKEN}/sendMessage",
-
-            json={
-
-                "chat_id":
-                    CHAT_ID,
-
-                "text":
-                    text,
-
-                "disable_web_page_preview":
-                    True
-
+        session.post(
+            url,
+            data={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
             },
-
-            timeout=15
-
+            timeout=10
         )
-
-        if response.ok:
-
-            return True
-
-        print(
-
-            "Telegram HTTP:",
-            response.status_code
-
-        )
-
-        return False
 
     except Exception as e:
 
-        print(
-            "Telegram:",
-            e
+        print("Telegram hata:", e)
+
+
+# ============================================================
+# SYMBOL FİLTRESİ
+# ============================================================
+
+STOCK_WORDS = [
+    "AAPL",
+    "TSLA",
+    "NVDA",
+    "MSFT",
+    "AMZN",
+    "META",
+    "GOOG",
+    "GOOGL",
+    "NFLX",
+    "COIN",
+    "MSTR",
+    "AMD",
+    "INTC",
+    "BA",
+    "DIS",
+    "NIO",
+    "BABA",
+    "PDD",
+    "PLTR",
+    "QQQ",
+    "SPY",
+    "IWM",
+    "DIA",
+    "XAU",
+    "XAG",
+    "GOLD",
+    "SILVER",
+    "OIL"
+]
+
+
+def is_stock_like(symbol):
+
+    s = symbol.upper()
+
+    for word in STOCK_WORDS:
+
+        if word in s:
+            return True
+
+    return False
+
+
+# ============================================================
+# KONTRATLARI AL
+# ============================================================
+
+def get_contracts():
+
+    data = get_json(
+        BASE_URL + "/api/v1/contract/detail"
+    )
+
+    if not data:
+        return []
+
+    result = data.get("data", [])
+
+    symbols = []
+
+    for x in result:
+
+        try:
+
+            symbol = x.get("symbol", "")
+
+            quote = x.get("quoteCoin", "")
+
+            state = x.get("state", 0)
+
+            if not symbol:
+                continue
+
+            if quote != "USDT":
+                continue
+
+            if state != 0:
+                continue
+
+            if is_stock_like(symbol):
+                continue
+
+            symbols.append(symbol)
+
+        except Exception:
+            continue
+
+    return list(set(symbols))
+
+
+# ============================================================
+# TICKER
+# ============================================================
+
+def get_ticker(symbol):
+
+    data = get_json(
+        BASE_URL + "/api/v1/contract/ticker",
+        params={
+            "symbol": symbol
+        }
+    )
+
+    if not data:
+        return None
+
+    d = data.get("data")
+
+    if not d:
+        return None
+
+    return d
+
+
+# ============================================================
+# KLINE
+# ============================================================
+
+def get_klines(symbol, interval, limit=100):
+
+    data = get_json(
+        BASE_URL + "/api/v1/contract/kline/" + symbol,
+        params={
+            "interval": interval,
+            "limit": limit
+        }
+    )
+
+    if not data:
+        return []
+
+    d = data.get("data")
+
+    if not d:
+        return []
+
+    try:
+
+        times = d.get("time", [])
+        opens = d.get("open", [])
+        highs = d.get("high", [])
+        lows = d.get("low", [])
+        closes = d.get("close", [])
+        vols = d.get("vol", [])
+
+        result = []
+
+        length = min(
+            len(times),
+            len(opens),
+            len(highs),
+            len(lows),
+            len(closes),
+            len(vols)
         )
 
-        return False
+        for i in range(length):
+
+            result.append({
+                "time": float(times[i]),
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(vols[i])
+            })
+
+        return result
+
+    except Exception:
+
+        return []
 
 
 # ============================================================
-# ALARM METNİ
+# RSI
 # ============================================================
 
-def alert_text(
-    symbol,
-    zone,
-    current_price,
-    distance
-):
+def calculate_rsi(closes, period=14):
 
-    zone_type = zone[
-        "type"
+    if len(closes) <= period:
+        return None
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(closes)):
+
+        diff = closes[i] - closes[i - 1]
+
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
+
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            avg_gain * (period - 1)
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            avg_loss * (period - 1)
+            + losses[i]
+        ) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+# ============================================================
+# HACİM ORANI
+# ============================================================
+
+def volume_ratio(klines, lookback=20):
+
+    if len(klines) < lookback + 2:
+        return 0
+
+    current = klines[-1]["volume"]
+
+    previous = [
+        x["volume"]
+        for x in klines[-lookback-1:-1]
     ]
 
-    if zone_type == "DEMAND":
+    avg_volume = sum(previous) / len(previous)
 
-        title = "🟦 DEMAND ALARMI"
+    if avg_volume <= 0:
+        return 0
 
-        status = "DEMAND BÖLGESİ"
+    return current / avg_volume
+
+
+# ============================================================
+# PRICE CHANGE
+# ============================================================
+
+def price_change(klines, candles_back):
+
+    if len(klines) <= candles_back:
+        return 0
+
+    old_price = klines[-candles_back-1]["close"]
+    current = klines[-1]["close"]
+
+    if old_price <= 0:
+        return 0
+
+    return (
+        (current - old_price)
+        / old_price
+    ) * 100
+
+
+# ============================================================
+# BTC YÖNÜ
+# ============================================================
+
+def get_btc_direction():
+
+    try:
+
+        k15 = get_klines(
+            "BTC_USDT",
+            "Min15",
+            80
+        )
+
+        k1h = get_klines(
+            "BTC_USDT",
+            "Min60",
+            80
+        )
+
+        k4h = get_klines(
+            "BTC_USDT",
+            "Hour4",
+            80
+        )
+
+        if (
+            len(k15) < 30
+            or len(k1h) < 30
+            or len(k4h) < 30
+        ):
+            return "NEUTRAL"
+
+        c15 = [x["close"] for x in k15]
+        c1h = [x["close"] for x in k1h]
+        c4h = [x["close"] for x in k4h]
+
+        r15 = calculate_rsi(c15)
+        r1h = calculate_rsi(c1h)
+        r4h = calculate_rsi(c4h)
+
+        score = 0
+
+        if r15 and r15 > 50:
+            score += 1
+        elif r15 and r15 < 48:
+            score -= 1
+
+        if r1h and r1h > 50:
+            score += 1
+        elif r1h and r1h < 48:
+            score -= 1
+
+        if r4h and r4h > 50:
+            score += 1
+        elif r4h and r4h < 48:
+            score -= 1
+
+        if score >= 2:
+            return "BULLISH"
+
+        if score <= -2:
+            return "BEARISH"
+
+        return "NEUTRAL"
+
+    except Exception:
+
+        return "NEUTRAL"
+
+
+# ============================================================
+# OPEN FLOW / PARA AKIŞI
+# ============================================================
+
+def get_open_flow(symbol):
+
+    data = get_json(
+        BASE_URL + "/api/v1/contract/deals/" + symbol,
+        params={
+            "limit": DEALS_LIMIT
+        }
+    )
+
+    if not data:
+        return None
+
+    deals = data.get("data")
+
+    if not deals:
+        return None
+
+    buy_money = 0.0
+    sell_money = 0.0
+
+    buy_count = 0
+    sell_count = 0
+
+    total_money = 0.0
+
+    try:
+
+        for deal in deals:
+
+            price = float(
+                deal.get("p", 0)
+            )
+
+            volume = float(
+                deal.get("v", 0)
+            )
+
+            side = deal.get("T")
+
+            money = price * volume
+
+            if money <= 0:
+                continue
+
+            total_money += money
+
+            # MEXC deal side:
+            # 1 = buy
+            # 2 = sell
+
+            if str(side) == "1":
+
+                buy_money += money
+                buy_count += 1
+
+            elif str(side) == "2":
+
+                sell_money += money
+                sell_count += 1
+
+        if total_money <= 0:
+            return None
+
+        net_flow = buy_money - sell_money
+
+        buy_ratio = (
+            buy_money / total_money
+        ) * 100
+
+        sell_ratio = (
+            sell_money / total_money
+        ) * 100
+
+        # ====================================================
+        # PARA GİRİŞ SKORU
+        # ====================================================
+
+        score = 0
+
+        # %55 üzeri alış baskısı
+        if buy_ratio >= 55:
+            score += 20
+
+        if buy_ratio >= 60:
+            score += 10
+
+        if buy_ratio >= 65:
+            score += 10
+
+        if buy_ratio >= 70:
+            score += 10
+
+        # Net para akışı
+        if net_flow > 0:
+            score += 10
+
+        if buy_count > sell_count:
+            score += 5
+
+        # Maksimum 65
+        score = min(score, 65)
+
+        return {
+            "buy_money": buy_money,
+            "sell_money": sell_money,
+            "net_flow": net_flow,
+            "buy_ratio": buy_ratio,
+            "sell_ratio": sell_ratio,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "total_money": total_money,
+            "money_score": score
+        }
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# DEMAND / SUPPLY
+# ============================================================
+
+def detect_demand_supply(klines):
+
+    if len(klines) < 30:
+        return "NONE"
+
+    recent = klines[-20:]
+
+    lows = [
+        x["low"]
+        for x in recent
+    ]
+
+    highs = [
+        x["high"]
+        for x in recent
+    ]
+
+    current = klines[-1]["close"]
+
+    low_zone = min(lows)
+    high_zone = max(highs)
+
+    range_size = high_zone - low_zone
+
+    if range_size <= 0:
+        return "NONE"
+
+    # Demand'a yakınlık
+    demand_distance = (
+        current - low_zone
+    ) / range_size
+
+    # Supply'a yakınlık
+    supply_distance = (
+        high_zone - current
+    ) / range_size
+
+    # Alt bölgenin %25'i
+    if demand_distance <= 0.25:
+
+        # Son mum yükselişse demand teyidi
+        if klines[-1]["close"] >= klines[-1]["open"]:
+            return "DEMAND"
+
+    # Üst bölgenin %25'i
+    if supply_distance <= 0.25:
+
+        if klines[-1]["close"] <= klines[-1]["open"]:
+            return "SUPPLY"
+
+    return "NONE"
+
+
+# ============================================================
+# MONEY FLOW DERECESİ
+# ============================================================
+
+def money_strength(score):
+
+    if score >= 55:
+        return "ÇOK GÜÇLÜ"
+
+    if score >= 45:
+        return "GÜÇLÜ"
+
+    if score >= 35:
+        return "ORTA"
+
+    return "ZAYIF"
+
+
+# ============================================================
+# TEK COIN ANALİZİ
+# ============================================================
+
+def analyze_symbol(symbol, btc_direction):
+
+    try:
+
+        ticker = get_ticker(symbol)
+
+        if not ticker:
+            return None
+
+        # ====================================================
+        # 24H HACİM
+        # ====================================================
+
+        amount = float(
+            ticker.get("amount24", 0)
+        )
+
+        if amount < MIN_24H_VOLUME:
+            return None
+
+        # ====================================================
+        # KLINE
+        # ====================================================
+
+        k15 = get_klines(
+            symbol,
+            "Min15",
+            100
+        )
+
+        k1h = get_klines(
+            symbol,
+            "Min60",
+            100
+        )
+
+        k4h = get_klines(
+            symbol,
+            "Hour4",
+            100
+        )
+
+        if (
+            len(k15) < 40
+            or len(k1h) < 40
+            or len(k4h) < 40
+        ):
+            return None
+
+        # ====================================================
+        # RSI
+        # ====================================================
+
+        rsi15 = calculate_rsi(
+            [x["close"] for x in k15]
+        )
+
+        rsi1h = calculate_rsi(
+            [x["close"] for x in k1h]
+        )
+
+        rsi4h = calculate_rsi(
+            [x["close"] for x in k4h]
+        )
+
+        if (
+            rsi15 is None
+            or rsi1h is None
+            or rsi4h is None
+        ):
+            return None
+
+        # RSI filtre
+        if not (
+            MIN_RSI_15 <= rsi15 <= MAX_RSI_15
+        ):
+            return None
+
+        if not (
+            MIN_RSI_1H <= rsi1h <= MAX_RSI_1H
+        ):
+            return None
+
+        if not (
+            MIN_RSI_4H <= rsi4h <= MAX_RSI_4H
+        ):
+            return None
+
+        # ====================================================
+        # HACİM
+        # ====================================================
+
+        vr15 = volume_ratio(k15)
+
+        vr1h = volume_ratio(k1h)
+
+        if vr15 < MIN_VOLUME_RATIO:
+            return None
+
+        # ====================================================
+        # FİYAT HAREKETİ
+        # ====================================================
+
+        change15 = price_change(
+            k15,
+            1
+        )
+
+        change1h = price_change(
+            k15,
+            4
+        )
+
+        change4h = price_change(
+            k4h,
+            1
+        )
+
+        # Çoktan pump yapmış coinleri alma
+        if change15 > MAX_15M_PUMP:
+            return None
+
+        if change1h > MAX_1H_PUMP:
+            return None
+
+        # ====================================================
+        # PARA AKIŞI
+        # ====================================================
+
+        flow = get_open_flow(symbol)
+
+        if not flow:
+            return None
+
+        money_score = flow["money_score"]
+
+        if money_score < MIN_MONEY_SCORE:
+            return None
+
+        # ====================================================
+        # DEMAND / SUPPLY
+        # ====================================================
+
+        zone = detect_demand_supply(k4h)
+
+        # ====================================================
+        # TOPLAM SKOR
+        # ====================================================
+
+        total_score = 0
+
+        # Para
+        total_score += min(
+            money_score,
+            65
+        )
+
+        # Hacim
+        if vr15 >= 1.30:
+            total_score += 5
+
+        if vr15 >= 1.60:
+            total_score += 5
+
+        if vr15 >= 2.00:
+            total_score += 5
+
+        # RSI
+        if 50 <= rsi15 <= 65:
+            total_score += 5
+
+        if 50 <= rsi1h <= 65:
+            total_score += 5
+
+        # 4H trend
+        if rsi4h >= 50:
+            total_score += 5
+
+        # Demand bonus
+        if zone == "DEMAND":
+            total_score += 10
+
+        # BTC
+        if btc_direction == "BULLISH":
+            total_score += 5
+
+        # ====================================================
+        # BTC BEARISH İSE LONG ZAYIFLAT
+        # ====================================================
+
+        if btc_direction == "BEARISH":
+
+            total_score -= 10
+
+        if total_score < MIN_TOTAL_SCORE:
+            return None
+
+        # ====================================================
+        # SONUÇ
+        # ====================================================
+
+        return {
+            "symbol": symbol,
+            "money_score": money_score,
+            "total_score": total_score,
+
+            "buy_money": flow["buy_money"],
+            "sell_money": flow["sell_money"],
+            "net_flow": flow["net_flow"],
+
+            "buy_ratio": flow["buy_ratio"],
+            "sell_ratio": flow["sell_ratio"],
+
+            "volume_ratio": vr15,
+
+            "rsi15": rsi15,
+            "rsi1h": rsi1h,
+            "rsi4h": rsi4h,
+
+            "change15": change15,
+            "change1h": change1h,
+            "change4h": change4h,
+
+            "zone": zone,
+
+            "btc": btc_direction
+        }
+
+    except Exception as e:
+
+        return None
+
+
+# ============================================================
+# PARA FORMAT
+# ============================================================
+
+def format_money(value):
+
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+
+    return f"{value:.0f}"
+
+
+# ============================================================
+# TELEGRAM MESAJI
+# ============================================================
+
+def create_message(x):
+
+    symbol = x["symbol"]
+
+    money_strength_text = money_strength(
+        x["money_score"]
+    )
+
+    if x["zone"] == "DEMAND":
+
+        zone_text = "🟢 DEMAND"
+
+    elif x["zone"] == "SUPPLY":
+
+        zone_text = "🔴 SUPPLY"
 
     else:
 
-        title = "🟥 SUPPLY ALARMI"
+        zone_text = "⚪ BÖLGE YOK"
 
-        status = "SUPPLY BÖLGESİ"
+    if x["btc"] == "BULLISH":
 
-    return (
+        btc_text = "🟢 BTC BULLISH"
 
-        f"{title}\n\n"
+    elif x["btc"] == "BEARISH":
 
-        f"🪙 {symbol}\n\n"
+        btc_text = "🔴 BTC BEARISH"
 
-        f"📌 4H {zone_type}\n"
+    else:
 
-        f"📍 Bölge: "
-        f"{price(zone['low'])}"
-        f" - "
-        f"{price(zone['high'])}\n\n"
+        btc_text = "⚪ BTC NEUTRAL"
 
-        f"💰 Fiyat: "
-        f"{price(current_price)}\n"
+    message = f"""
+🚨 <b>PARA GİRİŞİ + HACİM</b>
 
-        f"📏 Bölge uzaklığı: "
-        f"{distance:.2f}%\n\n"
+🟢 <b>{symbol}</b>
 
-        f"🏗 Yapı: ✅\n"
+💰 Para Akışı: <b>{money_strength_text}</b>
+💵 Alış: <b>{format_money(x["buy_money"])}</b>
+💸 Satış: <b>{format_money(x["sell_money"])}</b>
 
-        f"⏱ ZAMAN: 4H\n"
+📊 Alış Oranı: <b>%{x["buy_ratio"]:.1f}</b>
+📈 Hacim: <b>{x["volume_ratio"]:.2f}x</b>
 
-        f"📌 Durum: "
-        f"{status}\n\n"
+📊 RSI 15M: <b>{x["rsi15"]:.1f}</b>
+📊 RSI 1H: <b>{x["rsi1h"]:.1f}</b>
+📊 RSI 4H: <b>{x["rsi4h"]:.1f}</b>
 
-        "⚠️ Sadece Supply/Demand "
-        "bölge alarmıdır.\n"
+🎯 Bölge: <b>{zone_text}</b>
+{btc_text}
 
-        "Otomatik işlem açmaz."
+🔥 Toplam Skor: <b>{x["total_score"]}</b>
+"""
 
+    return message.strip()
+
+
+# ============================================================
+# COOLDOWN
+# ============================================================
+
+def can_send(symbol):
+
+    now = time.time()
+
+    last = STATE.get(symbol, 0)
+
+    cooldown = COOLDOWN_HOURS * 3600
+
+    if now - last < cooldown:
+        return False
+
+    return True
+
+
+def mark_sent(symbol):
+
+    STATE[symbol] = time.time()
+
+    save_state(STATE)
+
+
+# ============================================================
+# ANA TARAMA
+# ============================================================
+
+def scan():
+
+    print()
+    print("=" * 60)
+    print("🚀 MONEY FLOW + VOLUME RADAR")
+    print("=" * 60)
+
+    btc_direction = get_btc_direction()
+
+    print(
+        "BTC YÖNÜ:",
+        btc_direction
     )
 
+    symbols = get_contracts()
 
-# ============================================================
-# SYMBOL ANALİZ
-# ============================================================
+    if not symbols:
 
-def analyze_symbol(
-    symbol,
-    ticker
-):
+        print("Coin bulunamadı.")
+        return
 
-    current_price = fnum(
+    print(
+        "Taranacak futures:",
+        len(symbols)
+    )
 
-        ticker.get(
-            "lastPrice"
+    results = []
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = {
+            executor.submit(
+                analyze_symbol,
+                symbol,
+                btc_direction
+            ): symbol
+            for symbol in symbols
+        }
+
+        for future in as_completed(futures):
+
+            try:
+
+                result = future.result()
+
+                if result:
+                    results.append(result)
+
+            except Exception:
+                pass
+
+    # ========================================================
+    # SKORA GÖRE SIRALA
+    # ========================================================
+
+    results.sort(
+        key=lambda x: (
+            x["total_score"],
+            x["money_score"],
+            x["volume_ratio"]
+        ),
+        reverse=True
+    )
+
+    print(
+        "Güçlü sonuç:",
+        len(results)
+    )
+
+    alerts = 0
+
+    for result in results:
+
+        symbol = result["symbol"]
+
+        if not can_send(symbol):
+            continue
+
+        message = create_message(result)
+
+        print()
+        print(
+            symbol,
+            "| SCORE:",
+            result["total_score"],
+            "| MONEY:",
+            result["money_score"],
+            "| VOL:",
+            round(
+                result["volume_ratio"],
+                2
+            )
         )
 
-    )
+        send_telegram(message)
 
-    if current_price <= 0:
+        mark_sent(symbol)
 
-        return None
+        alerts += 1
 
-    candles = get_4h_kline(
-        symbol
-    )
-
-    if not candles:
-
-        return None
-
-    zones = find_zones(
-
-        symbol,
-
-        candles
-
-    )
-
-    if not zones:
-
-        return None
-
-    active = get_active_zone(
-
-        zones,
-
-        current_price
-
-    )
-
-    if not active:
-
-        return None
-
-    return {
-
-        "symbol":
-            symbol,
-
-        "price":
-            current_price,
-
-        "zone":
-            active["zone"],
-
-        "distance":
-            active["distance"]
-
-    }
+        if alerts >= MAX_ALERTS:
+            break
 
 
 # ============================================================
@@ -2289,365 +1182,42 @@ def analyze_symbol(
 
 def main():
 
-    started = time.time()
-
+    print()
+    print("==========================================")
+    print("🚀 MEXC MONEY FLOW RADAR")
+    print("==========================================")
     print()
 
-    print(
-        "=" * 65
-    )
-
-    print(
-        "🚨 MEXC SUPPLY / DEMAND RADAR V18.0"
-    )
-
-    print(
-        "🪙 SADECE KRİPTO FUTURES"
-    )
-
-    print(
-        "⏱ 4H"
-    )
-
-    print(
-        "📐 SWING 10 | HISTORY 20 | ATR 14 | WIDTH 2.5"
-    )
-
-    print(
-        "🎯 SADECE FİYAT ZONE'A GELİNCE ALARM"
-    )
-
-    print(
-        "=" * 65
-    )
-
-    # ========================================================
-    # CONTRACTS
-    # ========================================================
-
-    contracts = get_contracts()
-
-    if not contracts:
-
-        print(
-            "❌ Futures alınamadı."
-        )
-
-        return
-
-    # ========================================================
-    # TICKERS
-    # ========================================================
-
-    tickers = get_tickers()
-
-    if not tickers:
-
-        print(
-            "❌ Ticker alınamadı."
-        )
-
-        return
-
-    # ========================================================
-    # LİKİDİTE SIRALAMA
-    #
-    # Çok küçük / ölü coinleri ilk aşamada azaltıyoruz.
-    # Ancak Supply/Demand sisteminin mantığını bozacak
-    # teknik filtre kullanmıyoruz.
-    # ========================================================
-
-    symbols = []
-
-    for symbol, info in contracts.items():
-
-        ticker = tickers.get(
-            symbol
-        )
-
-        if not ticker:
-
-            continue
-
-        amount24 = fnum(
-
-            ticker.get(
-                "amount24"
-            )
-
-        )
-
-        last = fnum(
-
-            ticker.get(
-                "lastPrice"
-            )
-
-        )
-
-        if last <= 0:
-
-            continue
-
-        # Likidite çok düşük coinleri ele
-
-        if amount24 < 50_000:
-
-            continue
-
-        symbols.append({
-
-            "symbol":
-                symbol,
-
-            "ticker":
-                ticker,
-
-            "amount24":
-                amount24
-
-        })
-
-    # ========================================================
-    # HACME GÖRE SIRALA
-    # ========================================================
-
-    symbols.sort(
-
-        key=lambda x:
-            x["amount24"],
-
-        reverse=True
-
-    )
-
-    symbols = symbols[
-        :MAX_SYMBOLS
-    ]
-
-    print()
-
-    print(
-        f"📊 Futures: "
-        f"{len(contracts)}"
-    )
-
-    print(
-        f"🪙 Kripto Futures: "
-        f"{stats['crypto']}"
-    )
-
-    print(
-        f"🔎 4H taranacak: "
-        f"{len(symbols)}"
-    )
-
-    # ========================================================
-    # STATE
-    # ========================================================
-
-    state = load_state()
-
-    alerts = []
-
-    # ========================================================
-    # TARAMA
-    # ========================================================
-
-    for i, item in enumerate(
-
-        symbols,
-
-        1
-
-    ):
-
-        symbol = item[
-            "symbol"
-        ]
-
-        ticker = item[
-            "ticker"
-        ]
+    while True:
 
         try:
 
-            result = analyze_symbol(
+            scan()
 
-                symbol,
+        except KeyboardInterrupt:
 
-                ticker
-
+            print(
+                "Program kapatıldı."
             )
+
+            break
 
         except Exception as e:
 
             print(
-
-                f"❌ {symbol}:",
+                "ANA HATA:",
                 e
-
             )
 
-            continue
+        print()
+        print(
+            f"⏳ {SCAN_INTERVAL} saniye bekleniyor..."
+        )
 
-        if not result:
+        time.sleep(
+            SCAN_INTERVAL
+        )
 
-            continue
-
-        zone = result[
-            "zone"
-        ]
-
-        # ====================================================
-        # ALARM
-        # ====================================================
-
-        if should_alert(
-
-            symbol,
-
-            zone,
-
-            state
-
-        ):
-
-            alerts.append(
-                result
-            )
-
-            print()
-
-            print(
-                "🚨 ALARM:"
-            )
-
-            print(
-                symbol,
-                zone["type"],
-                price(
-                    zone["low"]
-                ),
-                "-",
-                price(
-                    zone["high"]
-                )
-            )
-
-            text = alert_text(
-
-                symbol,
-
-                zone,
-
-                result["price"],
-
-                result["distance"]
-
-            )
-
-            if telegram(
-                text
-            ):
-
-                stats[
-                    "alerts"
-                ] += 1
-
-        # ====================================================
-        # İLERLEME
-        # ====================================================
-
-        if (
-
-            i % 25
-            ==
-            0
-
-        ):
-
-            print(
-
-                f"🔎 {i}/"
-                f"{len(symbols)}"
-
-            )
-
-    # ========================================================
-    # STATE
-    # ========================================================
-
-    save_state(
-        state
-    )
-
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
-    duration = (
-
-        time.time()
-        -
-        started
-
-    )
-
-    print()
-
-    print(
-        "=" * 65
-    )
-
-    print(
-        "✅ TARAMA TAMAMLANDI"
-    )
-
-    print(
-        f"⏱ Süre: "
-        f"{duration:.1f} sn"
-    )
-
-    print(
-        f"🪙 Kripto: "
-        f"{stats['crypto']}"
-    )
-
-    print(
-        f"📦 Supply zone: "
-        f"{stats['supply_zones']}"
-    )
-
-    print(
-        f"📦 Demand zone: "
-        f"{stats['demand_zones']}"
-    )
-
-    print(
-        f"🚨 Yeni alarm: "
-        f"{stats['alerts']}"
-    )
-
-    print(
-        f"⚠️ 510: "
-        f"{stats['rate_510']}"
-    )
-
-    print(
-        f"❌ API hata: "
-        f"{stats['errors']}"
-    )
-
-    print(
-        "=" * 65
-    )
-
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     main()
