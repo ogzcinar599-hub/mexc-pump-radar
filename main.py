@@ -1,172 +1,721 @@
 import os
 import json
 import time
+import math
+import gzip
 import threading
-import requests
-
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+import websocket
+
 
 # ============================================================
-# 🚀 MEXC MONEY FLOW RADAR V4.2
+# 🚀 MEXC PRE-PUMP RADAR V2
 #
+# SADECE:
 # ✅ MEXC USDT FUTURES
-# ✅ PARA GİRİŞİ / OPEN FLOW
-# ✅ LONG / SHORT OPEN
-# ✅ 15M HACİM
-# ✅ 15M RSI
-# ✅ 1H RSI
-# ✅ 4H RSI
-# ✅ DEMAND
+# ✅ 15M + 1H + 4H
+# ✅ RSI
+# ✅ HACİM
+# ✅ MOMENTUM
+# ✅ OPEN FLOW
 # ✅ BTC YÖNÜ
-# ✅ COOLDOWN
+# ✅ DEMAND / SUPPLY
+# ✅ TP / SL
 # ✅ TELEGRAM
-# ✅ STOCK / TOKENIZED STOCK FİLTRESİ
-# ✅ RATE LIMIT KORUMASI
-# ============================================================
-
-
-# ============================================================
-# MEXC
-# ============================================================
-
-BASE_URL = "https://api.mexc.com"
-
-
-# ============================================================
-# TELEGRAM
+# ✅ DUPLICATE / COOLDOWN
 #
-# GitHub Secrets:
-#
-# BOT_TOKEN
-# CHAT_ID
-#
+# TEK TARAMA YAPAR VE ÇIKAR
 # ============================================================
+
+
+# ============================================================
+# AYARLAR
+# ============================================================
+
+REST_URL = "https://api.mexc.com"
+WS_URL = "wss://contract.mexc.com/edge"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-
-# ============================================================
-# GENEL
-# ============================================================
-
-SCAN_INTERVAL = 180
-
-MAX_ALERTS = 8
-
-COOLDOWN_HOURS = 4
-
+MAX_CANDIDATES = 50
 MAX_WORKERS = 5
-
-
-# ============================================================
-# TICKER
-# ============================================================
-
-TOP_CANDIDATES = 80
-
-TICKER_CACHE_FILE = "ticker_cache.json"
-
-TICKER_CACHE_TTL = 300
-
-
-# ============================================================
-# MONEY FLOW
-# ============================================================
 
 DEALS_LIMIT = 100
 
-MIN_OPEN_NOTIONAL = 20000
+MIN_24H_VOLUME = 50000
+MIN_VOLUME_RATIO = 1.15
 
-MIN_LONG_RATIO = 52.0
+MIN_OPEN_NOTIONAL = 15000
+MIN_NET_RATIO = 5.0
 
-MIN_NET_RATIO = 3.0
+MIN_SCORE = 70
 
+COOLDOWN_HOURS = 4
 
-# ============================================================
-# HACİM
-# ============================================================
+STATE_FILE = "sent_signals.json"
 
-MIN_24H_VOLUME = 100000
+WS_WAIT_SECONDS = 8
 
-MIN_VOLUME_RATIO = 1.05
+REQUEST_TIMEOUT = 15
 
+# TP / SL
+TP1_LONG = 1.03
+TP2_LONG = 1.06
+SL_LONG = 0.975
 
-# ============================================================
-# RSI
-# ============================================================
-
-MIN_RSI_15 = 42
-MAX_RSI_15 = 75
-
-MIN_RSI_1H = 42
-MAX_RSI_1H = 72
-
-MIN_RSI_4H = 40
-MAX_RSI_4H = 70
+TP1_SHORT = 0.97
+TP2_SHORT = 0.94
+SL_SHORT = 1.025
 
 
 # ============================================================
-# PUMP FİLTRESİ
+# HİSSE / TOKENIZED STOCK FİLTRESİ
 # ============================================================
 
-MAX_15M_PUMP = 8.0
-
-MAX_1H_PUMP = 15.0
-
-
-# ============================================================
-# SKOR
-# ============================================================
-
-MIN_SCORE = 35
-
-
-# ============================================================
-# RATE LIMIT
-# ============================================================
-
-REQUEST_INTERVAL = 0.12
-
-request_lock = threading.Lock()
-
-last_request_time = 0.0
+STOCK_FILTER = {
+    "AAPL",
+    "AMZN",
+    "GOOGL",
+    "GOOG",
+    "META",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "NFLX",
+    "AMD",
+    "INTC",
+    "COIN",
+    "MSTR",
+    "PLTR",
+    "HOOD",
+    "ARM",
+    "ORCL",
+    "CRM",
+    "BA",
+    "DIS",
+    "NKE",
+    "JPM",
+    "V",
+    "MA",
+    "WMT",
+    "PFE",
+    "BAC",
+    "COST",
+    "XOM",
+    "CVX",
+    "QQQ",
+    "SPY",
+    "IWM",
+}
 
 
 # ============================================================
 # SESSION
 # ============================================================
 
-session = requests.Session()
+SESSION = requests.Session()
 
-session.headers.update({
-
-    "User-Agent":
-        "Mozilla/5.0",
-
-    "Accept":
-        "application/json"
-
+SESSION.headers.update({
+    "User-Agent": "MEXC-PrePump-Radar/2.0"
 })
 
 
 # ============================================================
-# STATE
+# REQUEST RATE LIMIT
 # ============================================================
 
-STATE_FILE = "money_flow_state.json"
+REQUEST_LOCK = threading.Lock()
+LAST_REQUEST = 0.0
 
+REQUEST_INTERVAL = 0.12
+
+
+def rate_limit():
+    global LAST_REQUEST
+
+    with REQUEST_LOCK:
+        now = time.time()
+        wait = REQUEST_INTERVAL - (now - LAST_REQUEST)
+
+        if wait > 0:
+            time.sleep(wait)
+
+        LAST_REQUEST = time.time()
+
+
+# ============================================================
+# HTTP GET
+# ============================================================
+
+def http_get(path, params=None, retries=3):
+
+    url = REST_URL + path
+
+    for attempt in range(retries):
+
+        try:
+
+            rate_limit()
+
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code == 429:
+
+                time.sleep(2 + attempt * 2)
+                continue
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            return data
+
+        except Exception as e:
+
+            if attempt == retries - 1:
+                return None
+
+            time.sleep(1 + attempt)
+
+
+    return None
+
+
+# ============================================================
+# CONTRACT DETAILS
+# ============================================================
+
+def get_contracts():
+
+    data = http_get("/api/v1/contract/detail")
+
+    if not data:
+        return {}
+
+    rows = data.get("data", [])
+
+    result = {}
+
+    for item in rows:
+
+        try:
+
+            symbol = item.get("symbol", "")
+
+            if not symbol.endswith("_USDT"):
+                continue
+
+            if item.get("state") != 0:
+                continue
+
+            base = symbol.replace("_USDT", "").upper()
+
+            if base in STOCK_FILTER:
+                continue
+
+            contract_size = float(
+                item.get("contractSize", 0)
+            )
+
+            if contract_size <= 0:
+                continue
+
+            result[symbol] = {
+                "contract_size": contract_size,
+                "base": base
+            }
+
+        except Exception:
+            continue
+
+    return result
+
+
+# ============================================================
+# WEBSOCKET TÜM TICKERLAR
+# ============================================================
+
+def get_all_tickers_ws():
+
+    tickers = {}
+
+    ws = None
+
+    try:
+
+        ws = websocket.create_connection(
+            WS_URL,
+            timeout=5
+        )
+
+        subscribe = {
+            "method": "sub.tickers",
+            "param": {}
+        }
+
+        ws.send(json.dumps(subscribe))
+
+        start = time.time()
+
+        while time.time() - start < WS_WAIT_SECONDS:
+
+            try:
+
+                message = ws.recv()
+
+                if not message:
+                    continue
+
+                if isinstance(message, bytes):
+
+                    try:
+                        message = gzip.decompress(
+                            message
+                        ).decode("utf-8")
+
+                    except Exception:
+
+                        message = message.decode(
+                            "utf-8",
+                            errors="ignore"
+                        )
+
+                data = json.loads(message)
+
+                channel = data.get("channel", "")
+
+                if channel != "push.tickers":
+                    continue
+
+                rows = data.get("data", [])
+
+                if not isinstance(rows, list):
+                    continue
+
+                for row in rows:
+
+                    symbol = row.get("symbol", "")
+
+                    if not symbol.endswith("_USDT"):
+                        continue
+
+                    try:
+
+                        price = float(
+                            row.get("lastPrice", 0)
+                        )
+
+                        volume24 = float(
+                            row.get("volume24", 0)
+                        )
+
+                        change = float(
+                            row.get("riseFallRate", 0)
+                        ) * 100
+
+                        if price <= 0:
+                            continue
+
+                        tickers[symbol] = {
+                            "price": price,
+                            "volume24": volume24,
+                            "change24": change
+                        }
+
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+
+    except Exception as e:
+
+        print("WS HATA:", e)
+
+    finally:
+
+        try:
+            if ws:
+                ws.close()
+        except Exception:
+            pass
+
+    return tickers
+
+
+# ============================================================
+# KLINE
+# ============================================================
+
+def get_kline(symbol, interval, limit=50):
+
+    data = http_get(
+        f"/api/v1/contract/kline/{symbol}",
+        params={
+            "interval": interval
+        }
+    )
+
+    if not data:
+        return []
+
+    raw = data.get("data")
+
+    if not raw:
+        return []
+
+    try:
+
+        times = raw.get("time", [])
+        opens = raw.get("open", [])
+        closes = raw.get("close", [])
+        highs = raw.get("high", [])
+        lows = raw.get("low", [])
+        vols = raw.get("vol", [])
+
+        rows = []
+
+        length = min(
+            len(times),
+            len(opens),
+            len(closes),
+            len(highs),
+            len(lows),
+            len(vols)
+        )
+
+        for i in range(length):
+
+            rows.append({
+                "time": float(times[i]),
+                "open": float(opens[i]),
+                "close": float(closes[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "vol": float(vols[i])
+            })
+
+        if len(rows) > limit:
+            rows = rows[-limit:]
+
+        return rows
+
+    except Exception:
+
+        return []
+
+
+# ============================================================
+# RSI
+# ============================================================
+
+def calculate_rsi(closes, period=14):
+
+    if len(closes) < period + 1:
+        return None
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(closes)):
+
+        diff = closes[i] - closes[i - 1]
+
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+
+    avg_gain = sum(
+        gains[:period]
+    ) / period
+
+    avg_loss = sum(
+        losses[:period]
+    ) / period
+
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            (avg_gain * (period - 1))
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1))
+            + losses[i]
+        ) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+# ============================================================
+# VOLUME RATIO
+# ============================================================
+
+def volume_ratio(candles):
+
+    if len(candles) < 25:
+        return 0
+
+    current = candles[-1]["vol"]
+
+    previous = [
+        x["vol"]
+        for x in candles[-21:-1]
+    ]
+
+    avg = sum(previous) / len(previous)
+
+    if avg <= 0:
+        return 0
+
+    return current / avg
+
+
+# ============================================================
+# MOMENTUM
+# ============================================================
+
+def momentum(candles, bars=4):
+
+    if len(candles) <= bars:
+        return 0
+
+    old = candles[-bars - 1]["close"]
+    new = candles[-1]["close"]
+
+    if old == 0:
+        return 0
+
+    return ((new / old) - 1) * 100
+
+
+# ============================================================
+# DEMAND / SUPPLY
+# ============================================================
+
+def demand_supply(candles, price):
+
+    if len(candles) < 25:
+        return False, False
+
+    recent = candles[-30:]
+
+    lows = [
+        x["low"]
+        for x in recent
+    ]
+
+    highs = [
+        x["high"]
+        for x in recent
+    ]
+
+    demand_low = min(lows)
+    supply_high = max(highs)
+
+    demand_distance = (
+        (price - demand_low)
+        / price
+    ) * 100
+
+    supply_distance = (
+        (supply_high - price)
+        / price
+    ) * 100
+
+    demand = (
+        0 <= demand_distance <= 2.0
+    )
+
+    supply = (
+        0 <= supply_distance <= 2.0
+    )
+
+    return demand, supply
+
+
+# ============================================================
+# BTC YÖNÜ
+# ============================================================
+
+def get_btc_direction():
+
+    results = []
+
+    for interval in [
+        "Min15",
+        "Min60",
+        "Hour4"
+    ]:
+
+        candles = get_kline(
+            "BTC_USDT",
+            interval,
+            30
+        )
+
+        if len(candles) < 10:
+            continue
+
+        old = candles[-6]["close"]
+        new = candles[-1]["close"]
+
+        if old == 0:
+            continue
+
+        change = (
+            (new / old) - 1
+        ) * 100
+
+        results.append(change)
+
+    if len(results) < 2:
+        return "NEUTRAL"
+
+    positive = sum(
+        1 for x in results
+        if x > 0
+    )
+
+    negative = sum(
+        1 for x in results
+        if x < 0
+    )
+
+    if positive >= 2:
+        return "BULLISH"
+
+    if negative >= 2:
+        return "BEARISH"
+
+    return "NEUTRAL"
+
+
+# ============================================================
+# OPEN FLOW
+# ============================================================
+
+def get_open_flow(symbol, contract_size):
+
+    data = http_get(
+        f"/api/v1/contract/deals/{symbol}",
+        params={
+            "limit": DEALS_LIMIT
+        }
+    )
+
+    if not data:
+        return None
+
+    rows = data.get("data", [])
+
+    if not rows:
+        return None
+
+    long_open = 0.0
+    short_open = 0.0
+
+    total_open = 0.0
+
+    for trade in rows:
+
+        try:
+
+            price = float(
+                trade.get("p", 0)
+            )
+
+            volume = float(
+                trade.get("v", 0)
+            )
+
+            trade_type = int(
+                trade.get("T", 0)
+            )
+
+            open_flag = int(
+                trade.get("O", 0)
+            )
+
+            if price <= 0 or volume <= 0:
+                continue
+
+            if open_flag != 1:
+                continue
+
+            notional = (
+                price
+                * volume
+                * contract_size
+            )
+
+            if notional <= 0:
+                continue
+
+            total_open += notional
+
+            if trade_type == 1:
+                long_open += notional
+
+            elif trade_type == 2:
+                short_open += notional
+
+        except Exception:
+            continue
+
+    if total_open <= 0:
+        return None
+
+    long_ratio = (
+        long_open / total_open
+    ) * 100
+
+    short_ratio = (
+        short_open / total_open
+    ) * 100
+
+    net = long_open - short_open
+
+    net_ratio = (
+        abs(net)
+        / total_open
+    ) * 100
+
+    return {
+        "long_open": long_open,
+        "short_open": short_open,
+        "total_open": total_open,
+        "long_ratio": long_ratio,
+        "short_ratio": short_ratio,
+        "net": net,
+        "net_ratio": net_ratio
+    }
+
+
+# ============================================================
+# COOLDOWN
+# ============================================================
 
 def load_state():
 
     try:
-
-        if not os.path.exists(
-            STATE_FILE
-        ):
-
-            return {}
 
         with open(
             STATE_FILE,
@@ -181,10 +730,7 @@ def load_state():
         return {}
 
 
-STATE = load_state()
-
-
-def save_state():
+def save_state(state):
 
     try:
 
@@ -195,2056 +741,461 @@ def save_state():
         ) as f:
 
             json.dump(
-                STATE,
+                state,
                 f,
                 indent=2
             )
 
     except Exception as e:
 
-        print(
-            "STATE KAYIT HATASI:",
-            e
-        )
+        print("STATE SAVE HATA:", e)
 
 
-# ============================================================
-# API REQUEST
-# ============================================================
+def is_on_cooldown(symbol, state):
 
-def api_get(
-    path,
-    params=None,
-    timeout=15
-):
+    value = state.get(symbol)
 
-    global last_request_time
-
-    with request_lock:
-
-        now = time.monotonic()
-
-        wait = (
-
-            REQUEST_INTERVAL
-            -
-            (
-                now -
-                last_request_time
-            )
-
-        )
-
-        if wait > 0:
-
-            time.sleep(wait)
-
-        last_request_time = (
-            time.monotonic()
-        )
-
-    url = (
-        BASE_URL +
-        path
-    )
-
-    for attempt in range(3):
-
-        try:
-
-            response = session.get(
-
-                url,
-
-                params=params,
-
-                timeout=timeout
-
-            )
-
-            # Rate limit
-            if response.status_code == 429:
-
-                print(
-                    "⚠️ API RATE LIMIT - bekleniyor..."
-                )
-
-                time.sleep(
-                    2 + attempt * 2
-                )
-
-                continue
-
-
-            if response.status_code != 200:
-
-                return None
-
-
-            data = response.json()
-
-            return data
-
-
-        except Exception:
-
-            if attempt < 2:
-
-                time.sleep(1)
-
-            else:
-
-                return None
-
-    return None
-
-
-# ============================================================
-# STOCK / TOKENIZED STOCK FİLTRESİ
-# ============================================================
-
-STOCK_WORDS = [
-
-    "AAPL",
-    "TSLA",
-    "NVDA",
-    "MSFT",
-    "AMZN",
-    "META",
-    "GOOG",
-    "GOOGL",
-    "NFLX",
-    "COIN",
-    "MSTR",
-    "AMD",
-    "INTC",
-    "BA",
-    "DIS",
-    "NIO",
-    "BABA",
-    "PDD",
-    "PLTR",
-
-    "SPY",
-    "QQQ",
-    "IWM",
-    "DIA",
-
-    "XAUT",
-
-    "STOCK"
-
-]
-
-
-def is_stock_like(symbol):
-
-    symbol = symbol.upper()
-
-    for word in STOCK_WORDS:
-
-        if word in symbol:
-
-            return True
-
-    return False
-
-
-# ============================================================
-# CONTRACT CACHE
-# ============================================================
-
-CONTRACT_CACHE = {}
-
-CONTRACT_CACHE_TIME = 0
-
-CONTRACT_CACHE_TTL = 3600
-
-
-# ============================================================
-# FUTURES LİSTESİ
-# ============================================================
-
-def get_contracts():
-
-    global CONTRACT_CACHE
-    global CONTRACT_CACHE_TIME
-
-    now = time.time()
-
-    # Cache
-    if (
-
-        CONTRACT_CACHE
-        and
-        now -
-        CONTRACT_CACHE_TIME
-        <
-        CONTRACT_CACHE_TTL
-
-    ):
-
-        return CONTRACT_CACHE
-
-
-    print(
-        "📡 Futures listesi alınıyor..."
-    )
-
-
-    data = api_get(
-        "/api/v1/contract/detail"
-    )
-
-
-    if not data:
-
-        if CONTRACT_CACHE:
-
-            print(
-                "⚠️ Eski Futures cache kullanılıyor."
-            )
-
-            return CONTRACT_CACHE
-
-        return {}
-
-
-    rows = data.get(
-        "data",
-        []
-    )
-
-
-    result = {}
-
-
-    for item in rows:
-
-        try:
-
-            symbol = item.get(
-                "symbol",
-                ""
-            )
-
-            quote_coin = item.get(
-                "quoteCoin",
-                ""
-            )
-
-            state = int(
-                item.get(
-                    "state",
-                    0
-                )
-            )
-
-            contract_size = float(
-                item.get(
-                    "contractSize",
-                    0
-                )
-            )
-
-
-            if not symbol:
-
-                continue
-
-
-            if quote_coin != "USDT":
-
-                continue
-
-
-            if state != 0:
-
-                continue
-
-
-            if contract_size <= 0:
-
-                continue
-
-
-            if is_stock_like(
-                symbol
-            ):
-
-                continue
-
-
-            result[symbol] = {
-
-                "contract_size":
-                    contract_size,
-
-                "base_coin":
-                    item.get(
-                        "baseCoin",
-                        ""
-                    )
-
-            }
-
-
-        except Exception:
-
-            continue
-
-
-    if result:
-
-        CONTRACT_CACHE = result
-
-        CONTRACT_CACHE_TIME = now
-
-
-    return result
-
-
-# ============================================================
-# TICKER CACHE
-# ============================================================
-
-TICKER_CACHE = {}
-
-TICKER_CACHE_TIME = 0
-
-
-def load_ticker_cache():
-
-    global TICKER_CACHE
-    global TICKER_CACHE_TIME
+    if not value:
+        return False
 
     try:
 
-        if not os.path.exists(
-            TICKER_CACHE_FILE
-        ):
+        last_time = float(value)
 
-            return
-
-
-        with open(
-            TICKER_CACHE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            data = json.load(f)
-
-
-        TICKER_CACHE = data.get(
-            "tickers",
-            {}
+        age = (
+            time.time()
+            - last_time
         )
 
-
-        TICKER_CACHE_TIME = float(
-            data.get(
-                "time",
-                0
-            )
+        return age < (
+            COOLDOWN_HOURS * 3600
         )
-
 
     except Exception:
 
-        TICKER_CACHE = {}
-
-        TICKER_CACHE_TIME = 0
-
-
-load_ticker_cache()
-
-
-def save_ticker_cache():
-
-    try:
-
-        with open(
-            TICKER_CACHE_FILE,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            json.dump({
-
-                "time":
-                    TICKER_CACHE_TIME,
-
-                "tickers":
-                    TICKER_CACHE
-
-            }, f)
-
-    except Exception:
-
-        pass
+        return False
 
 
 # ============================================================
-# TEK TICKER
+# ANALİZ
 # ============================================================
 
-def get_ticker(symbol):
-
-    data = api_get(
-
-        "/api/v1/contract/ticker",
-
-        {
-            "symbol":
-                symbol
-        }
-
-    )
-
-
-    if not data:
-
-        return None
-
-
-    item = data.get(
-        "data"
-    )
-
-
-    if not item:
-
-        return None
-
-
-    if isinstance(
-        item,
-        list
-    ):
-
-        if not item:
-
-            return None
-
-        item = item[0]
-
-
-    if not isinstance(
-        item,
-        dict
-    ):
-
-        return None
-
-
-    return item
-
-
-# ============================================================
-# TICKERLARI GÜNCELLE
-# ============================================================
-
-def refresh_tickers(
-    contracts
-):
-
-    global TICKER_CACHE
-    global TICKER_CACHE_TIME
-
-
-    now = time.time()
-
-
-    if (
-
-        TICKER_CACHE
-        and
-        now -
-        TICKER_CACHE_TIME
-        <
-        TICKER_CACHE_TTL
-
-    ):
-
-        print(
-            "📦 Ticker cache kullanılıyor:",
-            len(TICKER_CACHE)
-        )
-
-        return TICKER_CACHE
-
-
-    print()
-    print(
-        "📊 Futures ticker'ları güncelleniyor..."
-    )
-
-
-    symbols = list(
-        contracts.keys()
-    )
-
-
-    total = len(
-        symbols
-    )
-
-
-    new_cache = {}
-
-    completed = 0
-
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-
-
-        futures = {
-
-            executor.submit(
-                get_ticker,
-                symbol
-            ):
-            symbol
-
-            for symbol in symbols
-
-        }
-
-
-        for future in as_completed(
-            futures
-        ):
-
-            try:
-
-                symbol = futures[
-                    future
-                ]
-
-                ticker = future.result()
-
-
-                if ticker:
-
-                    new_cache[
-                        symbol
-                    ] = ticker
-
-
-            except Exception:
-
-                pass
-
-
-            completed += 1
-
-
-            if completed % 100 == 0:
-
-                print(
-
-                    f"   Ticker: "
-                    f"{completed}/"
-                    f"{total}"
-
-                )
-
-
-    if new_cache:
-
-        TICKER_CACHE = new_cache
-
-        TICKER_CACHE_TIME = time.time()
-
-        save_ticker_cache()
-
-
-    print(
-        "✅ Ticker alınan:",
-        len(TICKER_CACHE)
-    )
-
-
-    return TICKER_CACHE
-
-
-# ============================================================
-# TOP CANDIDATES
-# ============================================================
-
-def get_top_candidates(
-    contracts
-):
-
-    tickers = refresh_tickers(
-        contracts
-    )
-
-
-    if not tickers:
-
-        return []
-
-
-    candidates = []
-
-
-    for symbol in contracts:
-
-        ticker = tickers.get(
-            symbol
-        )
-
-
-        if not ticker:
-
-            continue
-
-
-        try:
-
-            amount24 = float(
-                ticker.get(
-                    "amount24",
-                    0
-                )
-            )
-
-
-            if amount24 < MIN_24H_VOLUME:
-
-                continue
-
-
-            last_price = float(
-                ticker.get(
-                    "lastPrice",
-                    0
-                )
-            )
-
-
-            rise = float(
-                ticker.get(
-                    "riseFallRate",
-                    0
-                )
-            )
-
-
-            candidates.append({
-
-                "symbol":
-                    symbol,
-
-                "amount24":
-                    amount24,
-
-                "last_price":
-                    last_price,
-
-                "change24":
-                    rise * 100,
-
-                "ticker":
-                    ticker
-
-            })
-
-
-        except Exception:
-
-            continue
-
-
-    candidates.sort(
-
-        key=lambda x:
-            x["amount24"],
-
-        reverse=True
-
-    )
-
-
-    return candidates[
-        :TOP_CANDIDATES
-    ]
-
-
-# ============================================================
-# KLINE
-# ============================================================
-
-def get_klines(
+def analyze_symbol(
     symbol,
-    interval,
-    limit=80
+    ticker,
+    contract
 ):
 
-    data = api_get(
+    price = ticker["price"]
 
-        f"/api/v1/contract/kline/{symbol}",
+    contract_size = contract["contract_size"]
 
-        {
-            "interval":
-                interval,
+    volume24 = ticker["volume24"]
 
-            "limit":
-                limit
+    change24 = ticker["change24"]
 
-        }
-
-    )
-
-
-    if not data:
-
-        return []
-
-
-    d = data.get(
-        "data"
-    )
-
-
-    if not d:
-
-        return []
-
-
-    try:
-
-        times = d.get(
-            "time",
-            []
-        )
-
-        opens = d.get(
-            "open",
-            []
-        )
-
-        highs = d.get(
-            "high",
-            []
-        )
-
-        lows = d.get(
-            "low",
-            []
-        )
-
-        closes = d.get(
-            "close",
-            []
-        )
-
-        volumes = d.get(
-            "vol",
-            []
-        )
-
-
-        length = min(
-
-            len(times),
-            len(opens),
-            len(highs),
-            len(lows),
-            len(closes),
-            len(volumes)
-
-        )
-
-
-        result = []
-
-
-        for i in range(
-            length
-        ):
-
-            result.append({
-
-                "time":
-                    float(
-                        times[i]
-                    ),
-
-                "open":
-                    float(
-                        opens[i]
-                    ),
-
-                "high":
-                    float(
-                        highs[i]
-                    ),
-
-                "low":
-                    float(
-                        lows[i]
-                    ),
-
-                "close":
-                    float(
-                        closes[i]
-                    ),
-
-                "volume":
-                    float(
-                        volumes[i]
-                    )
-
-            })
-
-
-        return result
-
-
-    except Exception:
-
-        return []
-
-
-# ============================================================
-# RSI
-# ============================================================
-
-def calculate_rsi(
-    closes,
-    period=14
-):
-
-    if len(closes) <= period:
-
+    if volume24 < MIN_24H_VOLUME:
         return None
 
-
-    gains = []
-
-    losses = []
-
-
-    for i in range(
-        1,
-        len(closes)
-    ):
-
-        diff = (
-
-            closes[i] -
-            closes[i - 1]
-
-        )
-
-
-        if diff >= 0:
-
-            gains.append(
-                diff
-            )
-
-            losses.append(0)
-
-        else:
-
-            gains.append(0)
-
-            losses.append(
-                abs(diff)
-            )
-
-
-    avg_gain = (
-        sum(
-            gains[:period]
-        )
-        /
-        period
-    )
-
-
-    avg_loss = (
-        sum(
-            losses[:period]
-        )
-        /
-        period
-    )
-
-
-    for i in range(
-        period,
-        len(gains)
-    ):
-
-        avg_gain = (
-
-            (
-                avg_gain *
-                (period - 1)
-            )
-            +
-            gains[i]
-
-        ) / period
-
-
-        avg_loss = (
-
-            (
-                avg_loss *
-                (period - 1)
-            )
-            +
-            losses[i]
-
-        ) / period
-
-
-    if avg_loss == 0:
-
-        return 100
-
-
-    rs = (
-        avg_gain /
-        avg_loss
-    )
-
-
-    return (
-
-        100 -
-        (
-            100 /
-            (1 + rs)
-        )
-
-    )
-
-
-# ============================================================
-# HACİM ORANI
-# ============================================================
-
-def get_volume_ratio(
-    klines
-):
-
-    if len(klines) < 25:
-
-        return 0
-
-
-    # Son kapanmış mum
-    current = klines[-2]
-
-
-    previous = [
-
-        x["volume"]
-
-        for x in
-        klines[
-            -22:-2
-        ]
-
-    ]
-
-
-    if not previous:
-
-        return 0
-
-
-    average = (
-
-        sum(previous)
-        /
-        len(previous)
-
-    )
-
-
-    if average <= 0:
-
-        return 0
-
-
-    return (
-
-        current["volume"]
-        /
-        average
-
-    )
-
-
-# ============================================================
-# FİYAT DEĞİŞİMİ
-# ============================================================
-
-def get_change(
-    klines,
-    candles
-):
-
-    if len(klines) < (
-        candles + 3
-    ):
-
-        return 0
-
-
-    current = klines[-2][
-        "close"
-    ]
-
-
-    old = klines[
-        -2 - candles
-    ][
-        "close"
-    ]
-
-
-    if old <= 0:
-
-        return 0
-
-
-    return (
-
-        (
-            current -
-            old
-        )
-        /
-        old
-
-    ) * 100
-
-
-# ============================================================
-# BTC YÖNÜ
-# ============================================================
-
-def get_btc_direction():
-
-    k15 = get_klines(
-        "BTC_USDT",
+    # --------------------------------------------------------
+    # KLINE
+    # --------------------------------------------------------
+
+    c15 = get_kline(
+        symbol,
         "Min15",
-        60
+        50
     )
 
-
-    k1h = get_klines(
-        "BTC_USDT",
+    c1h = get_kline(
+        symbol,
         "Min60",
-        60
+        50
     )
 
-
-    k4h = get_klines(
-        "BTC_USDT",
+    c4h = get_kline(
+        symbol,
         "Hour4",
-        60
+        50
     )
-
 
     if (
-
-        len(k15) < 30
-        or
-        len(k1h) < 30
-        or
-        len(k4h) < 30
-
+        len(c15) < 25
+        or len(c1h) < 25
+        or len(c4h) < 25
     ):
-
-        return "NEUTRAL"
-
-
-    r15 = calculate_rsi([
-
-        x["close"]
-        for x in k15[:-1]
-
-    ])
-
-
-    r1h = calculate_rsi([
-
-        x["close"]
-        for x in k1h[:-1]
-
-    ])
-
-
-    r4h = calculate_rsi([
-
-        x["close"]
-        for x in k4h[:-1]
-
-    ])
-
-
-    if None in (
-        r15,
-        r1h,
-        r4h
-    ):
-
-        return "NEUTRAL"
-
-
-    score = 0
-
-
-    if r15 >= 51:
-
-        score += 1
-
-    elif r15 <= 47:
-
-        score -= 1
-
-
-    if r1h >= 51:
-
-        score += 1
-
-    elif r1h <= 47:
-
-        score -= 1
-
-
-    if r4h >= 51:
-
-        score += 1
-
-    elif r4h <= 47:
-
-        score -= 1
-
-
-    if score >= 2:
-
-        return "BULLISH"
-
-
-    if score <= -2:
-
-        return "BEARISH"
-
-
-    return "NEUTRAL"
-
-
-# ============================================================
-# MONEY FLOW
-# ============================================================
-
-def get_money_flow(
-    symbol,
-    contract_size
-):
-
-    data = api_get(
-
-        f"/api/v1/contract/deals/{symbol}",
-
-        {
-            "limit":
-                DEALS_LIMIT
-        }
-
-    )
-
-
-    if not data:
-
         return None
 
-
-    deals = data.get(
-        "data"
-    )
-
-
-    if not deals:
-
-        return None
-
-
-    long_open = 0.0
-
-    short_open = 0.0
-
-
-    long_count = 0
-
-    short_count = 0
-
-
-    for deal in deals:
-
-        try:
-
-            price = float(
-                deal.get(
-                    "p",
-                    0
-                )
-            )
-
-
-            volume = float(
-                deal.get(
-                    "v",
-                    0
-                )
-            )
-
-
-            trade_type = int(
-                deal.get(
-                    "T",
-                    0
-                )
-            )
-
-
-            operation = int(
-                deal.get(
-                    "O",
-                    0
-                )
-            )
-
-
-            # SADECE AÇILIŞ
-            if operation != 1:
-
-                continue
-
-
-            if price <= 0:
-
-                continue
-
-
-            if volume <= 0:
-
-                continue
-
-
-            # Contract notional
-            notional = (
-
-                price
-                *
-                volume
-                *
-                contract_size
-
-            )
-
-
-            if notional <= 0:
-
-                continue
-
-
-            # T=1 BUY
-            if trade_type == 1:
-
-                long_open += notional
-
-                long_count += 1
-
-
-            # T=2 SELL
-            elif trade_type == 2:
-
-                short_open += notional
-
-                short_count += 1
-
-
-        except Exception:
-
-            continue
-
-
-    total_open = (
-
-        long_open +
-        short_open
-
-    )
-
-
-    if total_open <= 0:
-
-        return None
-
-
-    long_ratio = (
-
-        long_open /
-        total_open
-
-    ) * 100
-
-
-    short_ratio = (
-
-        short_open /
-        total_open
-
-    ) * 100
-
-
-    net_open = (
-
-        long_open -
-        short_open
-
-    )
-
-
-    net_ratio = (
-
-        net_open /
-        total_open
-
-    ) * 100
-
-
-    # ========================================================
-    # MONEY SCORE
-    # ========================================================
-
-    score = 0
-
-
-    if long_ratio >= 52:
-
-        score += 10
-
-
-    if long_ratio >= 55:
-
-        score += 10
-
-
-    if long_ratio >= 60:
-
-        score += 10
-
-
-    if long_ratio >= 65:
-
-        score += 10
-
-
-    if long_ratio >= 70:
-
-        score += 10
-
-
-    if net_ratio >= 3:
-
-        score += 5
-
-
-    if net_ratio >= 7:
-
-        score += 5
-
-
-    if net_ratio >= 12:
-
-        score += 5
-
-
-    return {
-
-        "long_open":
-            long_open,
-
-        "short_open":
-            short_open,
-
-        "total_open":
-            total_open,
-
-        "long_ratio":
-            long_ratio,
-
-        "short_ratio":
-            short_ratio,
-
-        "net_open":
-            net_open,
-
-        "net_ratio":
-            net_ratio,
-
-        "long_count":
-            long_count,
-
-        "short_count":
-            short_count,
-
-        "money_score":
-            score
-
-    }
-
-
-# ============================================================
-# DEMAND
-# ============================================================
-
-def detect_demand(
-    klines
-):
-
-    if len(klines) < 25:
-
-        return False
-
-
-    candles = klines[
-        -22:-2
-    ]
-
-
-    lowest = min(
-
-        x["low"]
-
-        for x in candles
-
-    )
-
-
-    highest = max(
-
-        x["high"]
-
-        for x in candles
-
-    )
-
-
-    current = klines[-2][
-        "close"
-    ]
-
-
-    price_range = (
-
-        highest -
-        lowest
-
-    )
-
-
-    if price_range <= 0:
-
-        return False
-
-
-    position = (
-
-        current -
-        lowest
-
-    ) / price_range
-
-
-    # Alt %30
-    if position > 0.30:
-
-        return False
-
-
-    last = klines[-2]
-
-
-    # Son mum yeşil
-    if last["close"] < last["open"]:
-
-        return False
-
-
-    return True
-
-
-# ============================================================
-# SCORE
-# ============================================================
-
-def calculate_score(
-    flow,
-    volume_ratio,
-    rsi15,
-    rsi1h,
-    rsi4h,
-    demand,
-    btc
-):
-
-    score = 0
-
-
-    # PARA
-    score += flow[
-        "money_score"
-    ]
-
-
-    # HACİM
-    if volume_ratio >= 1.05:
-
-        score += 5
-
-
-    if volume_ratio >= 1.30:
-
-        score += 5
-
-
-    if volume_ratio >= 1.70:
-
-        score += 5
-
-
-    if volume_ratio >= 2.50:
-
-        score += 5
-
-
+    # --------------------------------------------------------
     # RSI
-    if 48 <= rsi15 <= 65:
+    # --------------------------------------------------------
 
-        score += 5
+    rsi15 = calculate_rsi(
+        [x["close"] for x in c15]
+    )
 
+    rsi1h = calculate_rsi(
+        [x["close"] for x in c1h]
+    )
 
-    if 48 <= rsi1h <= 65:
+    rsi4h = calculate_rsi(
+        [x["close"] for x in c4h]
+    )
 
-        score += 5
+    if (
+        rsi15 is None
+        or rsi1h is None
+        or rsi4h is None
+    ):
+        return None
 
+    # --------------------------------------------------------
+    # HACİM
+    # --------------------------------------------------------
 
-    if 45 <= rsi4h <= 65:
+    vol_ratio = volume_ratio(c15)
 
-        score += 5
+    if vol_ratio < MIN_VOLUME_RATIO:
+        return None
 
+    # --------------------------------------------------------
+    # MOMENTUM
+    # --------------------------------------------------------
 
-    # DEMAND
+    mom15 = momentum(
+        c15,
+        4
+    )
+
+    mom1h = momentum(
+        c1h,
+        4
+    )
+
+    # --------------------------------------------------------
+    # DEMAND / SUPPLY
+    # --------------------------------------------------------
+
+    demand, supply = demand_supply(
+        c15,
+        price
+    )
+
+    # --------------------------------------------------------
+    # OPEN FLOW
+    # --------------------------------------------------------
+
+    flow = get_open_flow(
+        symbol,
+        contract_size
+    )
+
+    if not flow:
+        return None
+
+    if flow["total_open"] < MIN_OPEN_NOTIONAL:
+        return None
+
+    # --------------------------------------------------------
+    # LONG / SHORT SCORE
+    # --------------------------------------------------------
+
+    long_score = 0
+    short_score = 0
+
+    # RSI 4H
+    if 48 <= rsi4h <= 68:
+        long_score += 15
+
+    if 32 <= rsi4h <= 52:
+        short_score += 15
+
+    # RSI 1H
+    if 50 <= rsi1h <= 68:
+        long_score += 10
+
+    if 32 <= rsi1h <= 50:
+        short_score += 10
+
+    # RSI 15M
+    if 50 <= rsi15 <= 72:
+        long_score += 8
+
+    if 28 <= rsi15 <= 50:
+        short_score += 8
+
+    # Volume
+    if vol_ratio >= 1.25:
+        long_score += 10
+        short_score += 10
+
+    if vol_ratio >= 1.50:
+        long_score += 5
+        short_score += 5
+
+    # Momentum
+    if mom15 > 0.30:
+        long_score += 8
+
+    if mom15 < -0.30:
+        short_score += 8
+
+    if mom1h > 0.50:
+        long_score += 7
+
+    if mom1h < -0.50:
+        short_score += 7
+
+    # Demand / Supply
     if demand:
+        long_score += 10
 
-        score += 10
+    if supply:
+        short_score += 10
 
+    # Open flow
+    if flow["long_ratio"] >= 55:
+        long_score += 15
 
+    if flow["short_ratio"] >= 55:
+        short_score += 15
+
+    # Net flow
+    if flow["net"] > 0:
+        long_score += 5
+
+    if flow["net"] < 0:
+        short_score += 5
+
+    # --------------------------------------------------------
     # BTC
-    if btc == "BULLISH":
+    # --------------------------------------------------------
 
-        score += 5
+    btc = get_btc_direction()
+
+    if btc == "BULLISH":
+        long_score += 10
+        short_score -= 8
 
     elif btc == "BEARISH":
-
-        score -= 5
-
-
-    return score
-
-
-# ============================================================
-# COIN ANALİZ
-# ============================================================
-
-def analyze_coin(
-    candidate,
-    contract,
-    btc
-):
-
-    symbol = candidate[
-        "symbol"
-    ]
-
-
-    try:
-
-        contract_size = float(
-            contract[
-                "contract_size"
-            ]
-        )
-
-
-        # ====================================================
-        # MONEY
-        # ====================================================
-
-        flow = get_money_flow(
-
-            symbol,
-            contract_size
-
-        )
-
-
-        if not flow:
-
-            return None
-
-
-        if flow[
-            "total_open"
-        ] < MIN_OPEN_NOTIONAL:
-
-            return None
-
-
-        if flow[
-            "long_ratio"
-        ] < MIN_LONG_RATIO:
-
-            return None
-
-
-        if flow[
-            "net_ratio"
-        ] < MIN_NET_RATIO:
-
-            return None
-
-
-        # ====================================================
-        # 15M
-        # ====================================================
-
-        k15 = get_klines(
-
-            symbol,
-            "Min15",
-            80
-
-        )
-
-
-        if len(k15) < 30:
-
-            return None
-
-
-        volume = get_volume_ratio(
-            k15
-        )
-
-
-        if volume < MIN_VOLUME_RATIO:
-
-            return None
-
-
-        change15 = get_change(
-            k15,
-            1
-        )
-
-
-        change1h = get_change(
-            k15,
-            4
-        )
-
-
-        if change15 > MAX_15M_PUMP:
-
-            return None
-
-
-        if change1h > MAX_1H_PUMP:
-
-            return None
-
-
-        # ====================================================
-        # 1H
-        # ====================================================
-
-        k1h = get_klines(
-
-            symbol,
-            "Min60",
-            80
-
-        )
-
-
-        if len(k1h) < 30:
-
-            return None
-
-
-        # ====================================================
-        # 4H
-        # ====================================================
-
-        k4h = get_klines(
-
-            symbol,
-            "Hour4",
-            80
-
-        )
-
-
-        if len(k4h) < 30:
-
-            return None
-
-
-        # ====================================================
-        # RSI
-        # ====================================================
-
-        rsi15 = calculate_rsi([
-
-            x["close"]
-
-            for x in k15[:-1]
-
-        ])
-
-
-        rsi1h = calculate_rsi([
-
-            x["close"]
-
-            for x in k1h[:-1]
-
-        ])
-
-
-        rsi4h = calculate_rsi([
-
-            x["close"]
-
-            for x in k4h[:-1]
-
-        ])
-
-
-        if None in (
-            rsi15,
-            rsi1h,
-            rsi4h
+        short_score += 10
+        long_score -= 8
+
+    long_score = max(
+        0,
+        min(100, long_score)
+    )
+
+    short_score = max(
+        0,
+        min(100, short_score)
+    )
+
+    # --------------------------------------------------------
+    # YÖN
+    # --------------------------------------------------------
+
+    if long_score >= short_score:
+
+        direction = "LONG"
+        score = long_score
+
+        if (
+            flow["long_ratio"]
+            < 53
         ):
-
             return None
 
-
-        # ====================================================
-        # RSI FILTER
-        # ====================================================
-
-        if not (
-
-            MIN_RSI_15
-            <=
-            rsi15
-            <=
-            MAX_RSI_15
-
+        if (
+            flow["net_ratio"]
+            < MIN_NET_RATIO
         ):
-
             return None
 
+        if mom15 < -1.5:
+            return None
 
-        if not (
+        if change24 > 15:
+            return None
 
-            MIN_RSI_1H
-            <=
-            rsi1h
-            <=
-            MAX_RSI_1H
+    else:
 
+        direction = "SHORT"
+        score = short_score
+
+        if (
+            flow["short_ratio"]
+            < 53
         ):
-
             return None
 
-
-        if not (
-
-            MIN_RSI_4H
-            <=
-            rsi4h
-            <=
-            MAX_RSI_4H
-
+        if (
+            flow["net_ratio"]
+            < MIN_NET_RATIO
         ):
-
             return None
 
-
-        # ====================================================
-        # DEMAND
-        # ====================================================
-
-        demand = detect_demand(
-            k4h
-        )
-
-
-        # ====================================================
-        # SCORE
-        # ====================================================
-
-        score = calculate_score(
-
-            flow,
-
-            volume,
-
-            rsi15,
-
-            rsi1h,
-
-            rsi4h,
-
-            demand,
-
-            btc
-
-        )
-
-
-        if score < MIN_SCORE:
-
+        if mom15 > 1.5:
             return None
 
+        if change24 < -15:
+            return None
 
-        return {
-
-            "symbol":
-                symbol,
-
-            "score":
-                score,
-
-            "money_score":
-                flow[
-                    "money_score"
-                ],
-
-            "long_open":
-                flow[
-                    "long_open"
-                ],
-
-            "short_open":
-                flow[
-                    "short_open"
-                ],
-
-            "total_open":
-                flow[
-                    "total_open"
-                ],
-
-            "long_ratio":
-                flow[
-                    "long_ratio"
-                ],
-
-            "short_ratio":
-                flow[
-                    "short_ratio"
-                ],
-
-            "net_open":
-                flow[
-                    "net_open"
-                ],
-
-            "net_ratio":
-                flow[
-                    "net_ratio"
-                ],
-
-            "volume_ratio":
-                volume,
-
-            "rsi15":
-                rsi15,
-
-            "rsi1h":
-                rsi1h,
-
-            "rsi4h":
-                rsi4h,
-
-            "change15":
-                change15,
-
-            "change1h":
-                change1h,
-
-            "demand":
-                demand,
-
-            "btc":
-                btc,
-
-            "amount24":
-                candidate[
-                    "amount24"
-                ]
-
-        }
-
-
-    except Exception:
-
+    if score < MIN_SCORE:
         return None
+
+    # --------------------------------------------------------
+    # TP / SL
+    # --------------------------------------------------------
+
+    if direction == "LONG":
+
+        tp1 = price * TP1_LONG
+        tp2 = price * TP2_LONG
+        sl = price * SL_LONG
+
+    else:
+
+        tp1 = price * TP1_SHORT
+        tp2 = price * TP2_SHORT
+        sl = price * SL_SHORT
+
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "score": score,
+        "price": price,
+        "rsi15": rsi15,
+        "rsi1h": rsi1h,
+        "rsi4h": rsi4h,
+        "volume_ratio": vol_ratio,
+        "momentum15": mom15,
+        "momentum1h": mom1h,
+        "long_open": flow["long_open"],
+        "short_open": flow["short_open"],
+        "total_open": flow["total_open"],
+        "long_ratio": flow["long_ratio"],
+        "short_ratio": flow["short_ratio"],
+        "net": flow["net"],
+        "net_ratio": flow["net_ratio"],
+        "demand": demand,
+        "supply": supply,
+        "btc": btc,
+        "change24": change24,
+        "tp1": tp1,
+        "tp2": tp2,
+        "sl": sl
+    }
 
 
 # ============================================================
 # PARA FORMAT
 # ============================================================
 
-def money_format(
-    value
-):
+def money(value):
 
     if value >= 1_000_000:
-
-        return (
-            f"{value / 1_000_000:.2f}M"
-        )
-
+        return f"{value / 1_000_000:.2f}M"
 
     if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
 
-        return (
-            f"{value / 1_000:.1f}K"
-        )
+    return f"{value:.0f}"
 
 
-    return (
-        f"{value:.0f}"
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def send_telegram(signal):
+
+    if not BOT_TOKEN or not CHAT_ID:
+
+        print("⚠️ BOT_TOKEN / CHAT_ID eksik.")
+
+        return False
+
+    symbol = signal["symbol"]
+    direction = signal["direction"]
+
+    text = (
+        f"🚨 <b>MEXC RADAR</b>\n\n"
+
+        f"🪙 <b>{symbol}</b>\n"
+        f"📈 Yön: <b>{direction}</b>\n"
+        f"⭐ Skor: <b>{signal['score']:.0f}/100</b>\n\n"
+
+        f"💰 Fiyat: "
+        f"<code>{signal['price']:.8g}</code>\n"
+
+        f"💵 Open Flow: "
+        f"<b>{money(signal['total_open'])} USDT</b>\n"
+
+        f"🟢 Long Open: "
+        f"{signal['long_ratio']:.1f}%\n"
+
+        f"🔴 Short Open: "
+        f"{signal['short_ratio']:.1f}%\n"
+
+        f"📊 Net Flow: "
+        f"<b>{money(abs(signal['net']))} USDT</b>\n\n"
+
+        f"📊 Volume: "
+        f"<b>{signal['volume_ratio']:.2f}x</b>\n"
+
+        f"RSI 15M: {signal['rsi15']:.1f}\n"
+        f"RSI 1H: {signal['rsi1h']:.1f}\n"
+        f"RSI 4H: {signal['rsi4h']:.1f}\n\n"
+
+        f"📍 Demand: "
+        f"{'✅' if signal['demand'] else '❌'}\n"
+
+        f"📍 Supply: "
+        f"{'✅' if signal['supply'] else '❌'}\n"
+
+        f"₿ BTC: "
+        f"<b>{signal['btc']}</b>\n\n"
+
+        f"🎯 TP1: <code>{signal['tp1']:.8g}</code>\n"
+        f"🎯 TP2: <code>{signal['tp2']:.8g}</code>\n"
+        f"🛑 SL: <code>{signal['sl']:.8g}</code>\n\n"
+
+        f"⚠️ Bu bir otomatik piyasa tarama sinyalidir; "
+        f"işlem garantisi değildir."
     )
-
-
-# ============================================================
-# TELEGRAM TEST
-# ============================================================
-
-def telegram_config_ok():
-
-    if not BOT_TOKEN:
-
-        print(
-            "❌ BOT_TOKEN bulunamadı."
-        )
-
-        return False
-
-
-    if not CHAT_ID:
-
-        print(
-            "❌ CHAT_ID bulunamadı."
-        )
-
-        return False
-
-
-    return True
-
-
-# ============================================================
-# TELEGRAM GÖNDER
-# ============================================================
-
-def send_telegram(
-    message
-):
-
-    if not telegram_config_ok():
-
-        return False
-
 
     url = (
-
         f"https://api.telegram.org/"
         f"bot{BOT_TOKEN}/sendMessage"
-
     )
-
 
     try:
 
-        response = session.post(
-
+        response = SESSION.post(
             url,
-
             data={
-
-                "chat_id":
-                    CHAT_ID,
-
-                "text":
-                    message,
-
-                "parse_mode":
-                    "HTML",
-
-                "disable_web_page_preview":
-                    True
-
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML"
             },
-
             timeout=15
-
         )
 
-
-        if response.status_code == 200:
-
-            print(
-                "📨 Telegram gönderildi."
-            )
+        if response.ok:
 
             return True
 
-
         print(
-            "❌ Telegram API hata:",
+            "Telegram hata:",
             response.text[:500]
         )
 
         return False
 
-
     except Exception as e:
 
         print(
-            "❌ Telegram bağlantı hatası:",
+            "Telegram bağlantı hatası:",
             e
         )
 
@@ -2252,181 +1203,44 @@ def send_telegram(
 
 
 # ============================================================
-# TELEGRAM MESAJ
-# ============================================================
-
-def build_message(
-    x
-):
-
-    if x["demand"]:
-
-        zone = "🟢 DEMAND"
-
-    else:
-
-        zone = "⚪ DEMAND YOK"
-
-
-    if x["btc"] == "BULLISH":
-
-        btc = "🟢 BTC BULLISH"
-
-    elif x["btc"] == "BEARISH":
-
-        btc = "🔴 BTC BEARISH"
-
-    else:
-
-        btc = "⚪ BTC NEUTRAL"
-
-
-    return f"""
-🚨 <b>MONEY FLOW RADAR</b>
-
-🟢 <b>{x["symbol"]}</b>
-
-🔥 SKOR:
-<b>{x["score"]}</b>
-
-💰 NET PARA:
-<b>{money_format(x["net_open"])} USDT</b>
-
-🟢 LONG OPEN:
-<b>{money_format(x["long_open"])} USDT</b>
-
-🔴 SHORT OPEN:
-<b>{money_format(x["short_open"])} USDT</b>
-
-📊 LONG ORANI:
-<b>%{x["long_ratio"]:.1f}</b>
-
-📈 15M HACİM:
-<b>{x["volume_ratio"]:.2f}x</b>
-
-RSI 15M:
-<b>{x["rsi15"]:.1f}</b>
-
-RSI 1H:
-<b>{x["rsi1h"]:.1f}</b>
-
-RSI 4H:
-<b>{x["rsi4h"]:.1f}</b>
-
-🎯 BÖLGE:
-<b>{zone}</b>
-
-{btc}
-""".strip()
-
-
-# ============================================================
-# COOLDOWN
-# ============================================================
-
-def can_send(
-    symbol
-):
-
-    last = STATE.get(
-        symbol,
-        0
-    )
-
-
-    return (
-
-        time.time() -
-        last
-
-    ) >= (
-
-        COOLDOWN_HOURS *
-        3600
-
-    )
-
-
-# ============================================================
-# TELEGRAM TEST MESAJI
-# ============================================================
-
-def send_startup_test():
-
-    message = """
-🟢 <b>MEXC MONEY FLOW RADAR</b>
-
-✅ Radar başladı.
-
-MEXC Futures bağlantısı aktif.
-Telegram bağlantısı aktif.
-
-Para girişi + hacim taraması başlıyor...
-""".strip()
-
-
-    return send_telegram(
-        message
-    )
-
-
-# ============================================================
 # ANA TARAMA
 # ============================================================
 
-def scan():
+def main():
 
     print()
-    print(
-        "=" * 65
-    )
+    print("=" * 65)
+    print("🚀 MEXC PRE-PUMP RADAR V2")
+    print("=" * 65)
 
     print(
-        "🚀 MEXC MONEY FLOW RADAR V4.2"
+        "Zaman:",
+        datetime.now(
+            timezone.utc
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
     )
 
-    print(
-        "=" * 65
-    )
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # TELEGRAM
-    # ========================================================
+    # --------------------------------------------------------
 
-    if not telegram_config_ok():
-
-        print()
+    if BOT_TOKEN and CHAT_ID:
+        print("✅ Telegram yapılandırıldı")
+    else:
         print(
-            "❌ Telegram Secret'ları bulunamadı."
+            "⚠️ Telegram Secret eksik"
         )
 
-        print(
-            "GitHub Actions → Secrets → BOT_TOKEN / CHAT_ID"
-        )
-
-        return
-
-
-    # ========================================================
-    # BTC
-    # ========================================================
-
-    btc = get_btc_direction()
-
-
-    print(
-        "BTC YÖNÜ:",
-        btc
-    )
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # CONTRACTS
-    # ========================================================
+    # --------------------------------------------------------
+
+    print()
+    print("📡 Futures sözleşmeleri alınıyor...")
 
     contracts = get_contracts()
-
 
     if not contracts:
 
@@ -2436,293 +1250,218 @@ def scan():
 
         return
 
-
     print(
-        "Toplam Futures:",
-        len(contracts)
+        f"✅ Aktif USDT Futures: "
+        f"{len(contracts)}"
     )
 
+    # --------------------------------------------------------
+    # TICKERS
+    # --------------------------------------------------------
 
-    # ========================================================
-    # CANDIDATES
-    # ========================================================
-
-    candidates = get_top_candidates(
-        contracts
-    )
-
-
+    print()
     print(
-        "Detaylı taranacak:",
-        len(candidates)
+        "📡 WebSocket ticker taraması..."
     )
 
+    tickers = get_all_tickers_ws()
 
-    if not candidates:
+    if not tickers:
 
         print(
-            "❌ Aday bulunamadı."
+            "❌ Ticker verisi alınamadı."
         )
 
         return
 
-
-    print()
     print(
-        "📊 EN YÜKSEK HACİMLİ ADAYLAR:"
+        f"✅ Ticker alınan coin: "
+        f"{len(tickers)}"
     )
 
+    # --------------------------------------------------------
+    # CONTRACT + TICKER KESİŞİMİ
+    # --------------------------------------------------------
 
-    for c in candidates[:10]:
+    candidates = []
 
-        print(
+    for symbol, ticker in tickers.items():
 
-            c["symbol"],
-            "| 24H:",
-            money_format(
-                c["amount24"]
+        if symbol not in contracts:
+            continue
+
+        if ticker["volume24"] <= 0:
+            continue
+
+        candidates.append(
+            (
+                symbol,
+                ticker
             )
-
         )
 
+    # En yüksek hacimli adaylar
+    candidates.sort(
+        key=lambda x: x[1]["volume24"],
+        reverse=True
+    )
 
-    # ========================================================
+    candidates = candidates[
+        :MAX_CANDIDATES
+    ]
+
+    print(
+        f"🔎 Detaylı taranacak: "
+        f"{len(candidates)}"
+    )
+
+    if not candidates:
+
+        print(
+            "❌ Uygun aday bulunamadı."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # BTC
+    # --------------------------------------------------------
+
+    print()
+    print("₿ BTC yönü hesaplanıyor...")
+
+    btc_direction = get_btc_direction()
+
+    print(
+        f"₿ BTC YÖNÜ: "
+        f"{btc_direction}"
+    )
+
+    # --------------------------------------------------------
+    # STATE
+    # --------------------------------------------------------
+
+    state = load_state()
+
+    # --------------------------------------------------------
     # ANALİZ
-    # ========================================================
+    # --------------------------------------------------------
 
     results = []
 
+    print()
+    print("🔍 Teknik + Open Flow analizleri...")
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-
         futures = {}
 
+        for symbol, ticker in candidates:
 
-        for candidate in candidates:
-
-            symbol = candidate[
-                "symbol"
-            ]
-
+            if is_on_cooldown(
+                symbol,
+                state
+            ):
+                continue
 
             futures[
                 executor.submit(
-
-                    analyze_coin,
-
-                    candidate,
-
-                    contracts[symbol],
-
-                    btc
-
+                    analyze_symbol,
+                    symbol,
+                    ticker,
+                    contracts[symbol]
                 )
             ] = symbol
-
 
         for future in as_completed(
             futures
         ):
 
+            symbol = futures[future]
+
             try:
 
                 result = future.result()
 
-
                 if result:
+                    results.append(result)
 
-                    results.append(
-                        result
-                    )
+            except Exception as e:
 
+                print(
+                    f"{symbol} hata: {e}"
+                )
 
-            except Exception:
-
-                pass
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # SIRALA
-    # ========================================================
+    # --------------------------------------------------------
 
     results.sort(
-
-        key=lambda x: (
-
-            x["score"],
-
-            x["money_score"],
-
-            x["net_open"],
-
-            x["volume_ratio"]
-
-        ),
-
+        key=lambda x: x["score"],
         reverse=True
-
     )
-
 
     print()
     print(
-        "🔥 GÜÇLÜ SONUÇ:",
-        len(results)
+        "=" * 65
     )
 
+    print(
+        f"🔥 GÜÇLÜ SONUÇ: "
+        f"{len(results)}"
+    )
 
-    # ========================================================
+    print(
+        "=" * 65
+    )
+
+    # --------------------------------------------------------
     # SONUÇLAR
-    # ========================================================
+    # --------------------------------------------------------
 
-    for x in results:
-
-        print()
+    for r in results:
 
         print(
-
-            f"{x['symbol']} "
-            f"| SCORE: {x['score']} "
-            f"| MONEY: {x['money_score']} "
-            f"| LONG: {x['long_ratio']:.1f}% "
-            f"| NET: {money_format(x['net_open'])} "
-            f"| VOL: {x['volume_ratio']:.2f}x "
-            f"| RSI15: {x['rsi15']:.1f} "
-            f"| DEMAND: {x['demand']}"
-
+            f"{r['symbol']} | "
+            f"{r['direction']} | "
+            f"SCORE {r['score']:.0f} | "
+            f"OPEN {money(r['total_open'])} | "
+            f"LONG {r['long_ratio']:.1f}% | "
+            f"SHORT {r['short_ratio']:.1f}% | "
+            f"VOL {r['volume_ratio']:.2f}x | "
+            f"RSI15 {r['rsi15']:.1f}"
         )
 
-
-    # ========================================================
+    # --------------------------------------------------------
     # TELEGRAM
-    # ========================================================
+    # --------------------------------------------------------
 
     sent = 0
 
+    # Aynı taramada en fazla 5 alarm
+    for signal in results[:5]:
 
-    for x in results:
+        if send_telegram(signal):
 
-        symbol = x[
-            "symbol"
-        ]
-
-
-        if not can_send(
-            symbol
-        ):
-
-            continue
-
-
-        message = build_message(
-            x
-        )
-
-
-        success = send_telegram(
-            message
-        )
-
-
-        if success:
-
-            STATE[
-                symbol
+            state[
+                signal["symbol"]
             ] = time.time()
-
-            save_state()
 
             sent += 1
 
-
-        if sent >= MAX_ALERTS:
-
-            break
-
+    save_state(state)
 
     print()
     print(
-        "📨 Gönderilen alarm:",
-        sent
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print()
-    print(
-        "=============================================="
-    )
-
-    print(
-        "🚀 MEXC MONEY FLOW RADAR V4.2"
-    )
-
-    print(
-        "=============================================="
+        f"📨 Gönderilen alarm: {sent}"
     )
 
     print()
-
-
-    # Telegram test
-    if telegram_config_ok():
-
-        print(
-            "✅ Telegram Secret bulundu."
-        )
-
-    else:
-
-        print(
-            "❌ Telegram Secret bulunamadı."
-        )
-
-
-    # ========================================================
-    # SÜREKLİ TARAMA
-    # ========================================================
-
-    while True:
-
-        try:
-
-            scan()
-
-
-        except KeyboardInterrupt:
-
-            print(
-                "Program kapatıldı."
-            )
-
-            break
-
-
-        except Exception as e:
-
-            print(
-                "❌ ANA HATA:",
-                e
-            )
-
-
-        print()
-
-        print(
-            f"⏳ {SCAN_INTERVAL} saniye bekleniyor..."
-        )
-
-        time.sleep(
-            SCAN_INTERVAL
-        )
+    print(
+        "✅ Tarama tamamlandı."
+    )
 
 
 # ============================================================
@@ -2731,4 +1470,19 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
+    try:
+
+        main()
+
+    except KeyboardInterrupt:
+
+        print(
+            "\n⛔ Durduruldu."
+        )
+
+    except Exception as e:
+
+        print(
+            "\n❌ ANA HATA:",
+            e
+        )
