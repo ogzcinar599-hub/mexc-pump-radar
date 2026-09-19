@@ -3,9 +3,16 @@ name: Radar
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "7,17,27,37,47,57 * * * *"
+
+concurrency:
+  group: mexc-radar
+  cancel-in-progress: true
+
 jobs:
   radar:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -21,10 +28,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Requests kur
+      - name: Gereksinimleri kur
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install -r requirements.txt
 
       - name: Dosyaları kontrol et
         run: |
@@ -36,6 +43,6 @@ jobs:
       - name: Radar çalıştır
         run: |
           echo "================================"
-          echo "🚀 MEXC RADAR BAŞLIYOR"
+          echo "🚀 MEXC RADAR V2 BAŞLIYOR"
           echo "================================"
           python main.py
