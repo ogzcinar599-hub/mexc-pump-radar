@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# 🚀 MEXC PRE-PUMP RADAR V5
+# 🚀 MEXC PRE-PUMP RADAR V5.1
+#
+# V5 + GERÇEK 4H SUPPLY / DEMAND
 #
 # AMAÇ:
 # Pump başlamadan önce güçlü coinleri bulmak
@@ -21,12 +23,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ✅ OPEN FLOW
 # ✅ PARA GİRİŞİ
 # ✅ BTC YÖNÜ
-# ✅ DEMAND / SUPPLY
+# ✅ GERÇEK 4H DEMAND / SUPPLY
 # ✅ TP / SL
 # ✅ TELEGRAM
 # ✅ COOLDOWN
 #
-# Daha gevşek filtre + güçlü skor sistemi
+# ÖNEMLİ:
+#
+# LONG = DEMAND DEĞİLDİR
+# SHORT = SUPPLY DEĞİLDİR
+#
+# DEMAND / SUPPLY SADECE GERÇEK 4H ZONE
+# İÇİNDEYSE YAZILIR.
 # ============================================================
 
 
@@ -36,27 +44,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://api.mexc.com"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    ""
+).strip()
+
+CHAT_ID = os.getenv(
+    "CHAT_ID",
+    ""
+).strip()
 
 
-# ------------------------------------------------------------
+# ============================================================
 # ADAY SAYISI
-# ------------------------------------------------------------
+# ============================================================
 
 MAX_CANDIDATES = 100
 
 
-# ------------------------------------------------------------
+# ============================================================
 # THREAD
-# ------------------------------------------------------------
+# ============================================================
 
 MAX_WORKERS = 6
 
 
-# ------------------------------------------------------------
+# ============================================================
 # OPEN FLOW
-# ------------------------------------------------------------
+# ============================================================
 
 DEALS_LIMIT = 100
 
@@ -69,43 +84,43 @@ MIN_LONG_RATIO = 51.5
 MIN_SHORT_RATIO = 51.5
 
 
-# ------------------------------------------------------------
+# ============================================================
 # HACİM
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_24H_VOLUME = 100000
 
 MIN_VOLUME_RATIO = 1.05
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SKOR
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_SCORE = 48
 
 
-# ------------------------------------------------------------
+# ============================================================
 # COOLDOWN
-# ------------------------------------------------------------
+# ============================================================
 
 COOLDOWN_HOURS = 4
 
 STATE_FILE = "sent_signals.json"
 
 
-# ------------------------------------------------------------
+# ============================================================
 # HTTP
-# ------------------------------------------------------------
+# ============================================================
 
 REQUEST_TIMEOUT = 15
 
 REQUEST_INTERVAL = 0.10
 
 
-# ------------------------------------------------------------
+# ============================================================
 # TELEGRAM
-# ------------------------------------------------------------
+# ============================================================
 
 MAX_TELEGRAM_ALERTS = 5
 
@@ -130,6 +145,24 @@ LONG_SL = 0.975
 SHORT_TP1 = 0.97
 SHORT_TP2 = 0.94
 SHORT_SL = 1.025
+
+
+# ============================================================
+# 4H SUPPLY / DEMAND AYARLARI
+# ============================================================
+
+ZONE_LOOKBACK = 60
+
+PIVOT_LEFT = 2
+
+PIVOT_RIGHT = 2
+
+# Zone oluştuktan sonra en az bu kadar ATR
+# hareket olması gerekiyor.
+IMPULSE_ATR_MULT = 1.0
+
+# Zone'a küçük ATR tamponu.
+ZONE_ATR_PADDING = 0.10
 
 
 # ============================================================
@@ -180,7 +213,7 @@ STOCK_FILTER = {
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "MEXC-PRE-PUMP-RADAR/5.0"
+    "User-Agent": "MEXC-PRE-PUMP-RADAR/5.1"
 })
 
 
@@ -206,6 +239,7 @@ def rate_limit():
         )
 
         if wait > 0:
+
             time.sleep(wait)
 
         LAST_REQUEST = time.time()
@@ -282,6 +316,7 @@ def get_contracts():
     )
 
     if not data:
+
         return {}
 
     rows = data.get(
@@ -305,6 +340,7 @@ def get_contracts():
             if not symbol.endswith(
                 "_USDT"
             ):
+
                 continue
 
             state = item.get(
@@ -316,9 +352,11 @@ def get_contracts():
                 try:
 
                     if int(state) != 0:
+
                         continue
 
                 except Exception:
+
                     pass
 
             base = symbol.replace(
@@ -327,6 +365,7 @@ def get_contracts():
             ).upper()
 
             if base in STOCK_FILTER:
+
                 continue
 
             contract_size = float(
@@ -337,10 +376,14 @@ def get_contracts():
             )
 
             if contract_size <= 0:
+
                 continue
 
             contracts[symbol] = {
-                "contract_size": contract_size
+
+                "contract_size":
+                    contract_size
+
             }
 
         except Exception:
@@ -361,6 +404,7 @@ def get_tickers():
     )
 
     if not data:
+
         return {}
 
     raw = data.get(
@@ -368,6 +412,7 @@ def get_tickers():
     )
 
     if not raw:
+
         return {}
 
     tickers = {}
@@ -393,14 +438,18 @@ def get_tickers():
                     list
                 ):
 
-                    rows.extend(value)
+                    rows.extend(
+                        value
+                    )
 
                 elif isinstance(
                     value,
                     dict
                 ):
 
-                    rows.append(value)
+                    rows.append(
+                        value
+                    )
 
     else:
 
@@ -420,6 +469,7 @@ def get_tickers():
             if not symbol.endswith(
                 "_USDT"
             ):
+
                 continue
 
             price = float(
@@ -453,11 +503,14 @@ def get_tickers():
 
             tickers[symbol] = {
 
-                "price": price,
+                "price":
+                    price,
 
-                "volume24": volume,
+                "volume24":
+                    volume,
 
-                "change24": change
+                "change24":
+                    change
 
             }
 
@@ -485,6 +538,7 @@ def get_kline(
     )
 
     if not data:
+
         return []
 
     raw = data.get(
@@ -492,6 +546,7 @@ def get_kline(
     )
 
     if not raw:
+
         return []
 
     try:
@@ -541,29 +596,23 @@ def get_kline(
 
             candles.append({
 
-                "time": float(
-                    times[i]
-                ),
+                "time":
+                    float(times[i]),
 
-                "open": float(
-                    opens[i]
-                ),
+                "open":
+                    float(opens[i]),
 
-                "close": float(
-                    closes[i]
-                ),
+                "close":
+                    float(closes[i]),
 
-                "high": float(
-                    highs[i]
-                ),
+                "high":
+                    float(highs[i]),
 
-                "low": float(
-                    lows[i]
-                ),
+                "low":
+                    float(lows[i]),
 
-                "vol": float(
-                    volumes[i]
-                )
+                "vol":
+                    float(volumes[i])
 
             })
 
@@ -673,6 +722,66 @@ def calculate_rsi(
 
 
 # ============================================================
+# ATR
+# ============================================================
+
+def calculate_atr(
+    candles,
+    period=14
+):
+
+    if len(candles) < (
+        period + 2
+    ):
+
+        return 0.0
+
+    trs = []
+
+    for i in range(
+        1,
+        len(candles)
+    ):
+
+        high = candles[i]["high"]
+
+        low = candles[i]["low"]
+
+        previous_close = candles[
+            i - 1
+        ]["close"]
+
+        tr = max(
+
+            high - low,
+
+            abs(
+                high
+                - previous_close
+            ),
+
+            abs(
+                low
+                - previous_close
+            )
+
+        )
+
+        trs.append(tr)
+
+    if len(trs) < period:
+
+        return 0.0
+
+    return (
+        sum(
+            trs[-period:]
+        )
+        / period
+    )
+
+
+# ============================================================
 # HACİM RATIO
 # ============================================================
 
@@ -684,11 +793,18 @@ def get_volume_ratio(
 
         return 0
 
-    current = candles[-1]["vol"]
+    current = candles[
+        -1
+    ]["vol"]
 
     previous = [
+
         x["vol"]
-        for x in candles[-21:-1]
+
+        for x in candles[
+            -21:-1
+        ]
+
     ]
 
     if not previous:
@@ -744,7 +860,7 @@ def get_momentum(
 
 
 # ============================================================
-# SON 15M DEĞİŞİM
+# SON DEĞİŞİM
 # ============================================================
 
 def get_recent_change(
@@ -776,67 +892,468 @@ def get_recent_change(
 
 
 # ============================================================
-# DEMAND / SUPPLY
+# ============================================================
+# 🔥 GERÇEK 4H SUPPLY / DEMAND
+# ============================================================
 # ============================================================
 
-def get_demand_supply(
+def find_4h_zones(
+    candles
+):
+
+    if len(candles) < 35:
+
+        return []
+
+    # Son açık mum kullanılmasın.
+    # Böylece henüz kapanmamış 4H mum
+    # zone hesabını bozmaz.
+
+    candles = candles[:-1]
+
+    if len(candles) < 35:
+
+        return []
+
+    candles = candles[
+        -ZONE_LOOKBACK:
+    ]
+
+    atr = calculate_atr(
+        candles,
+        14
+    )
+
+    if atr <= 0:
+
+        return []
+
+    zones = []
+
+    n = len(candles)
+
+
+    # ========================================================
+    # PIVOT LOW -> DEMAND
+    # ========================================================
+
+    for i in range(
+        PIVOT_LEFT,
+        n - PIVOT_RIGHT - 4
+    ):
+
+        current_low = candles[
+            i
+        ]["low"]
+
+        is_pivot_low = True
+
+
+        # Sol taraf
+
+        for j in range(
+            i - PIVOT_LEFT,
+            i
+        ):
+
+            if candles[j]["low"] < current_low:
+
+                is_pivot_low = False
+
+                break
+
+
+        if not is_pivot_low:
+
+            continue
+
+
+        # Sağ taraf
+
+        for j in range(
+            i + 1,
+            i + PIVOT_RIGHT + 1
+        ):
+
+            if candles[j]["low"] < current_low:
+
+                is_pivot_low = False
+
+                break
+
+
+        if not is_pivot_low:
+
+            continue
+
+
+        # ====================================================
+        # BULLISH IMPULSE
+        # ====================================================
+
+        future_end = min(
+            i + 5,
+            n
+        )
+
+        future_high = max(
+
+            candles[j]["high"]
+
+            for j in range(
+                i + 1,
+                future_end
+            )
+
+        )
+
+        impulse = (
+            future_high
+            - candles[i]["close"]
+        )
+
+
+        if impulse < (
+            atr
+            * IMPULSE_ATR_MULT
+        ):
+
+            continue
+
+
+        # ====================================================
+        # DEMAND ZONE
+        # ====================================================
+
+        body_high = max(
+
+            candles[i]["open"],
+
+            candles[i]["close"]
+
+        )
+
+        zone_low = (
+            current_low
+            - (
+                atr
+                * ZONE_ATR_PADDING
+            )
+        )
+
+        zone_high = body_high
+
+
+        if zone_high <= zone_low:
+
+            continue
+
+
+        # ====================================================
+        # ZONE SONRADAN KIRILDI MI?
+        # ====================================================
+
+        broken = False
+
+        for j in range(
+            i + 1,
+            n
+        ):
+
+            if candles[j]["close"] < zone_low:
+
+                broken = True
+
+                break
+
+
+        if broken:
+
+            continue
+
+
+        zones.append({
+
+            "type":
+                "DEMAND",
+
+            "low":
+                zone_low,
+
+            "high":
+                zone_high,
+
+            "index":
+                i,
+
+            "strength":
+                impulse / atr
+
+        })
+
+
+    # ========================================================
+    # PIVOT HIGH -> SUPPLY
+    # ========================================================
+
+    for i in range(
+        PIVOT_LEFT,
+        n - PIVOT_RIGHT - 4
+    ):
+
+        current_high = candles[
+            i
+        ]["high"]
+
+        is_pivot_high = True
+
+
+        # Sol taraf
+
+        for j in range(
+            i - PIVOT_LEFT,
+            i
+        ):
+
+            if candles[j]["high"] > current_high:
+
+                is_pivot_high = False
+
+                break
+
+
+        if not is_pivot_high:
+
+            continue
+
+
+        # Sağ taraf
+
+        for j in range(
+            i + 1,
+            i + PIVOT_RIGHT + 1
+        ):
+
+            if candles[j]["high"] > current_high:
+
+                is_pivot_high = False
+
+                break
+
+
+        if not is_pivot_high:
+
+            continue
+
+
+        # ====================================================
+        # BEARISH IMPULSE
+        # ====================================================
+
+        future_end = min(
+            i + 5,
+            n
+        )
+
+        future_low = min(
+
+            candles[j]["low"]
+
+            for j in range(
+                i + 1,
+                future_end
+            )
+
+        )
+
+        impulse = (
+            candles[i]["close"]
+            - future_low
+        )
+
+
+        if impulse < (
+            atr
+            * IMPULSE_ATR_MULT
+        ):
+
+            continue
+
+
+        # ====================================================
+        # SUPPLY ZONE
+        # ====================================================
+
+        body_low = min(
+
+            candles[i]["open"],
+
+            candles[i]["close"]
+
+        )
+
+        zone_low = body_low
+
+        zone_high = (
+            current_high
+            + (
+                atr
+                * ZONE_ATR_PADDING
+            )
+        )
+
+
+        if zone_high <= zone_low:
+
+            continue
+
+
+        # ====================================================
+        # ZONE SONRADAN KIRILDI MI?
+        # ====================================================
+
+        broken = False
+
+        for j in range(
+            i + 1,
+            n
+        ):
+
+            if candles[j]["close"] > zone_high:
+
+                broken = True
+
+                break
+
+
+        if broken:
+
+            continue
+
+
+        zones.append({
+
+            "type":
+                "SUPPLY",
+
+            "low":
+                zone_low,
+
+            "high":
+                zone_high,
+
+            "index":
+                i,
+
+            "strength":
+                impulse / atr
+
+        })
+
+
+    return zones
+
+
+# ============================================================
+# FİYAT HANGİ 4H ZONE İÇİNDE?
+# ============================================================
+
+def get_4h_zone(
     candles,
     price
 ):
 
-    if len(candles) < 25:
-
-        return False, False
-
-    recent = candles[-30:]
-
-    lows = [
-        x["low"]
-        for x in recent
-    ]
-
-    highs = [
-        x["high"]
-        for x in recent
-    ]
-
-    demand_level = min(lows)
-
-    supply_level = max(highs)
-
-    if price <= 0:
-
-        return False, False
-
-    demand_distance = (
-        (
-            price
-            - demand_level
-        )
-        / price
-    ) * 100
-
-    supply_distance = (
-        (
-            supply_level
-            - price
-        )
-        / price
-    ) * 100
-
-    demand = (
-        0
-        <= demand_distance
-        <= 2.5
+    zones = find_4h_zones(
+        candles
     )
 
-    supply = (
-        0
-        <= supply_distance
-        <= 2.5
+    if not zones:
+
+        return {
+
+            "type":
+                "NORMAL",
+
+            "low":
+                None,
+
+            "high":
+                None,
+
+            "strength":
+                0
+
+        }
+
+
+    inside = []
+
+
+    for zone in zones:
+
+        if (
+            zone["low"]
+            <= price
+            <= zone["high"]
+        ):
+
+            inside.append(
+                zone
+            )
+
+
+    # Fiyat hiçbir zone içinde değil.
+
+    if not inside:
+
+        return {
+
+            "type":
+                "NORMAL",
+
+            "low":
+                None,
+
+            "high":
+                None,
+
+            "strength":
+                0
+
+        }
+
+
+    # Birden fazla zone varsa
+    # en güçlü zone.
+
+    inside.sort(
+
+        key=lambda x:
+            x["strength"],
+
+        reverse=True
+
     )
 
-    return demand, supply
+
+    selected = inside[0]
+
+
+    return {
+
+        "type":
+            selected["type"],
+
+        "low":
+            selected["low"],
+
+        "high":
+            selected["high"],
+
+        "strength":
+            selected["strength"]
+
+    }
 
 
 # ============================================================
@@ -921,7 +1438,8 @@ def get_open_flow(
     data = api_get(
         f"/api/v1/contract/deals/{symbol}",
         params={
-            "limit": DEALS_LIMIT
+            "limit":
+                DEALS_LIMIT
         }
     )
 
@@ -943,6 +1461,7 @@ def get_open_flow(
     short_open = 0.0
 
     total_open = 0.0
+
 
     for trade in rows:
 
@@ -976,6 +1495,7 @@ def get_open_flow(
                 )
             )
 
+
             if (
                 price <= 0
                 or volume <= 0
@@ -983,9 +1503,11 @@ def get_open_flow(
 
                 continue
 
+
             if open_flag != 1:
 
                 continue
+
 
             notional = (
                 price
@@ -993,11 +1515,14 @@ def get_open_flow(
                 * contract_size
             )
 
+
             if notional <= 0:
 
                 continue
 
+
             total_open += notional
+
 
             if trade_type == 1:
 
@@ -1007,33 +1532,40 @@ def get_open_flow(
 
                 short_open += notional
 
+
         except Exception:
 
             continue
 
+
     if total_open <= 0:
 
         return None
+
 
     long_ratio = (
         long_open
         / total_open
     ) * 100
 
+
     short_ratio = (
         short_open
         / total_open
     ) * 100
+
 
     net = (
         long_open
         - short_open
     )
 
+
     net_ratio = (
         abs(net)
         / total_open
     ) * 100
+
 
     return {
 
@@ -1057,6 +1589,7 @@ def get_open_flow(
 
         "net_ratio":
             net_ratio
+
     }
 
 
@@ -1178,18 +1711,18 @@ def analyze_symbol(
         ]
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # 24H HACİM
-        # ----------------------------------------------------
+        # ====================================================
 
         if volume24 < MIN_24H_VOLUME:
 
             return None
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # 15M
-        # ----------------------------------------------------
+        # ====================================================
 
         c15 = get_kline(
             symbol,
@@ -1197,9 +1730,9 @@ def analyze_symbol(
         )
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # 1H
-        # ----------------------------------------------------
+        # ====================================================
 
         c1h = get_kline(
             symbol,
@@ -1207,9 +1740,9 @@ def analyze_symbol(
         )
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # 4H
-        # ----------------------------------------------------
+        # ====================================================
 
         c4h = get_kline(
             symbol,
@@ -1226,23 +1759,34 @@ def analyze_symbol(
             return None
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # RSI
-        # ----------------------------------------------------
+        # ====================================================
 
         rsi15 = calculate_rsi([
+
             x["close"]
+
             for x in c15
+
         ])
+
 
         rsi1h = calculate_rsi([
+
             x["close"]
+
             for x in c1h
+
         ])
 
+
         rsi4h = calculate_rsi([
+
             x["close"]
+
             for x in c4h
+
         ])
 
 
@@ -1255,9 +1799,9 @@ def analyze_symbol(
             return None
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # HACİM
-        # ----------------------------------------------------
+        # ====================================================
 
         vol_ratio = get_volume_ratio(
             c15
@@ -1269,14 +1813,15 @@ def analyze_symbol(
             return None
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # MOMENTUM
-        # ----------------------------------------------------
+        # ====================================================
 
         mom15 = get_momentum(
             c15,
             4
         )
+
 
         mom1h = get_momentum(
             c1h,
@@ -1284,9 +1829,9 @@ def analyze_symbol(
         )
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # SON 15M
-        # ----------------------------------------------------
+        # ====================================================
 
         change15 = get_recent_change(
             c15,
@@ -1294,21 +1839,36 @@ def analyze_symbol(
         )
 
 
-        # ----------------------------------------------------
-        # DEMAND / SUPPLY
-        # ----------------------------------------------------
+        # ====================================================
+        # 🔥 GERÇEK 4H ZONE
+        # ====================================================
 
-        demand, supply = (
-            get_demand_supply(
-                c15,
-                price
-            )
+        zone = get_4h_zone(
+            c4h,
+            price
         )
 
 
-        # ----------------------------------------------------
+        zone_type = zone[
+            "type"
+        ]
+
+
+        demand = (
+            zone_type
+            == "DEMAND"
+        )
+
+
+        supply = (
+            zone_type
+            == "SUPPLY"
+        )
+
+
+        # ====================================================
         # OPEN FLOW
-        # ----------------------------------------------------
+        # ====================================================
 
         flow = get_open_flow(
             symbol,
@@ -1329,9 +1889,9 @@ def analyze_symbol(
             return None
 
 
-        # ----------------------------------------------------
+        # ====================================================
         # SKOR
-        # ----------------------------------------------------
+        # ====================================================
 
         long_score = 0
 
@@ -1346,6 +1906,7 @@ def analyze_symbol(
 
             long_score += 15
 
+
         if 32 <= rsi4h <= 54:
 
             short_score += 15
@@ -1359,6 +1920,7 @@ def analyze_symbol(
 
             long_score += 10
 
+
         if 31 <= rsi1h <= 54:
 
             short_score += 10
@@ -1371,6 +1933,7 @@ def analyze_symbol(
         if 47 <= rsi15 <= 72:
 
             long_score += 8
+
 
         if 28 <= rsi15 <= 53:
 
@@ -1417,6 +1980,7 @@ def analyze_symbol(
 
             long_score += 7
 
+
         if mom15 > 0.50:
 
             long_score += 4
@@ -1425,6 +1989,7 @@ def analyze_symbol(
         if mom15 < -0.15:
 
             short_score += 7
+
 
         if mom15 < -0.50:
 
@@ -1452,7 +2017,7 @@ def analyze_symbol(
 
 
         # ====================================================
-        # DEMAND / SUPPLY
+        # 🔥 4H DEMAND / SUPPLY
         # ====================================================
 
         if demand:
@@ -1486,6 +2051,7 @@ def analyze_symbol(
 
 
         # Güçlü para üstünlüğü
+
         if flow["long_ratio"] >= 55:
 
             long_score += 5
@@ -1539,7 +2105,7 @@ def analyze_symbol(
 
 
         # ====================================================
-        # SKORU SINIRLA
+        # SCORE SINIRI
         # ====================================================
 
         long_score = max(
@@ -1549,6 +2115,7 @@ def analyze_symbol(
                 long_score
             )
         )
+
 
         short_score = max(
             0,
@@ -1569,7 +2136,9 @@ def analyze_symbol(
 
             score = long_score
 
-            # Para girişi kontrolü
+
+            # Para girişi
+
             if (
                 flow["long_ratio"]
                 < MIN_LONG_RATIO
@@ -1578,15 +2147,15 @@ def analyze_symbol(
                 return None
 
 
-            # Net para kontrolü
-            if (
-                flow["net"] <= 0
-            ):
+            # Net para
+
+            if flow["net"] <= 0:
 
                 return None
 
 
             # Minimum net oran
+
             if (
                 flow["net_ratio"]
                 < MIN_NET_RATIO
@@ -1595,13 +2164,29 @@ def analyze_symbol(
                 return None
 
 
-            # Çoktan pump olmuşsa ele
+            # Çoktan pump olmuşsa
+
             if change15 > MAX_15M_PUMP:
 
                 return None
 
 
             if change24 > MAX_1H_PUMP:
+
+                return None
+
+
+            # ------------------------------------------------
+            # LONG + SUPPLY ÇAKIŞMASI
+            # ------------------------------------------------
+            #
+            # Fiyat 4H Supply içindeyse LONG alarmını
+            # göndermiyoruz.
+            #
+            # Çünkü para girişi olsa bile fiyat doğrudan
+            # 4H direnç/supply bölgesindedir.
+
+            if supply:
 
                 return None
 
@@ -1621,9 +2206,7 @@ def analyze_symbol(
                 return None
 
 
-            if (
-                flow["net"] >= 0
-            ):
+            if flow["net"] >= 0:
 
                 return None
 
@@ -1642,6 +2225,15 @@ def analyze_symbol(
 
 
             if change24 < -MAX_1H_PUMP:
+
+                return None
+
+
+            # ------------------------------------------------
+            # SHORT + DEMAND ÇAKIŞMASI
+            # ------------------------------------------------
+
+            if demand:
 
                 return None
 
@@ -1754,6 +2346,22 @@ def analyze_symbol(
             "net_ratio":
                 flow["net_ratio"],
 
+            # ------------------------------------------------
+            # GERÇEK 4H ZONE
+            # ------------------------------------------------
+
+            "zone":
+                zone_type,
+
+            "zone_low":
+                zone["low"],
+
+            "zone_high":
+                zone["high"],
+
+            "zone_strength":
+                zone["strength"],
+
             "demand":
                 demand,
 
@@ -1774,6 +2382,7 @@ def analyze_symbol(
 
             "sl":
                 sl
+
         }
 
 
@@ -1823,6 +2432,39 @@ def money(
 
 
 # ============================================================
+# FİYAT FORMAT
+# ============================================================
+
+def price_format(
+    value
+):
+
+    if value is None:
+
+        return "-"
+
+    value = float(value)
+
+    if value >= 100:
+
+        return f"{value:.2f}"
+
+    if value >= 1:
+
+        return f"{value:.4f}"
+
+    if value >= 0.1:
+
+        return f"{value:.6f}"
+
+    if value >= 0.01:
+
+        return f"{value:.7f}"
+
+    return f"{value:.8f}"
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
@@ -1856,28 +2498,42 @@ def send_telegram(
         emoji = "🔴"
 
 
-    # --------------------------------------------------------
-    # DEMAND / SUPPLY
-    # --------------------------------------------------------
+    # ========================================================
+    # GERÇEK 4H ZONE
+    # ========================================================
 
-    if signal["demand"]:
+    if signal["zone"] == "DEMAND":
 
-        zone = "🟢 DEMAND"
+        zone_text = (
+            "🟢 <b>DEMAND</b>\n"
+            f"   {price_format(signal['zone_low'])}"
+            " → "
+            f"{price_format(signal['zone_high'])}"
+        )
 
-    elif signal["supply"]:
+    elif signal["zone"] == "SUPPLY":
 
-        zone = "🔴 SUPPLY"
+        zone_text = (
+            "🔴 <b>SUPPLY</b>\n"
+            f"   {price_format(signal['zone_low'])}"
+            " → "
+            f"{price_format(signal['zone_high'])}"
+        )
 
     else:
 
-        zone = "⚪ NORMAL"
+        zone_text = (
+            "⚪ <b>NORMAL</b>"
+        )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # NET
-    # --------------------------------------------------------
+    # ========================================================
 
-    net_value = signal["net"]
+    net_value = signal[
+        "net"
+    ]
 
 
     if net_value >= 0:
@@ -1893,9 +2549,9 @@ def send_telegram(
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # MESAJ
-    # --------------------------------------------------------
+    # ========================================================
 
     text = (
 
@@ -1907,13 +2563,13 @@ def send_telegram(
         f"<b>{direction}</b>\n"
 
         f"⭐ Güç: "
-        f"<b>{signal['score']:.0f}/100</b>\n"
+        f"<b>{signal['score']:.0f}/100</b>\n\n"
 
-        f"📍 Bölge: "
-        f"<b>{zone}</b>\n\n"
+        f"📍 <b>4H Bölge:</b>\n"
+        f"{zone_text}\n\n"
 
         f"💰 Fiyat: "
-        f"<code>{signal['price']:.8g}</code>\n"
+        f"<code>{price_format(signal['price'])}</code>\n"
 
         f"💵 Para: "
         f"<b>{money(signal['total_open'])} USDT</b>\n"
@@ -1946,13 +2602,13 @@ def send_telegram(
         f"<b>{signal['btc']}</b>\n\n"
 
         f"🎯 TP1: "
-        f"<code>{signal['tp1']:.8g}</code>\n"
+        f"<code>{price_format(signal['tp1'])}</code>\n"
 
         f"🎯 TP2: "
-        f"<code>{signal['tp2']:.8g}</code>\n"
+        f"<code>{price_format(signal['tp2'])}</code>\n"
 
         f"🛑 SL: "
-        f"<code>{signal['sl']:.8g}</code>\n\n"
+        f"<code>{price_format(signal['sl'])}</code>\n\n"
 
         f"⚠️ Otomatik radar sinyalidir."
     )
@@ -2026,7 +2682,11 @@ def main():
     print("=" * 70)
 
     print(
-        "🚀 MEXC PRE-PUMP RADAR V5"
+        "🚀 MEXC PRE-PUMP RADAR V5.1"
+    )
+
+    print(
+        "🎯 GERÇEK 4H SUPPLY / DEMAND"
     )
 
     print("=" * 70)
@@ -2131,9 +2791,9 @@ def main():
         )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # 24H HACME GÖRE SIRALA
-    # --------------------------------------------------------
+    # ========================================================
 
     candidates.sort(
 
@@ -2223,6 +2883,7 @@ def main():
                 contracts[symbol],
 
                 btc
+
             )
 
 
@@ -2290,11 +2951,10 @@ def main():
 
 
     # ========================================================
-    # TERMINAL SONUÇLARI
+    # TERMINAL
     # ========================================================
 
     for result in results:
-
 
         net_value = money(
             result["net"]
@@ -2309,6 +2969,9 @@ def main():
 
             f"SCORE: "
             f"{result['score']:.0f} | "
+
+            f"ZONE: "
+            f"{result['zone']} | "
 
             f"OPEN: "
             f"{money(result['total_open'])} | "
