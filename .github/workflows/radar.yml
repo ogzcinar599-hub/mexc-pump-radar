@@ -1,102 +1,997 @@
-name: Radar
 
-on:
-  workflow_dispatch:
+import os
+import json
+import time
+import threading
+import requests
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-  schedule:
-    - cron: "7,17,27,37,47,57 * * * *"
+# ============================================================
+# BITGET PRE-PUMP RADAR V10
+# USDT FUTURES | 15M + 1H + 4H
+# RSI | HACIM | PARA AKISI | OPEN INTEREST | BTC FILTRESI
+# SUPPLY / DEMAND YAKLASIMI | TELEGRAM
+# Otomatik emir acmaz.
+# ============================================================
 
-concurrency:
-  group: mexc-radar
-  cancel-in-progress: true
+BASE_URL = "https://api.bitget.com"
+PRODUCT_TYPE = "USDT-FUTURES"
 
-jobs:
-  radar:
-    runs-on: ubuntu-24.04
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-    env:
-      # GitHub Secrets
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+MAX_WORKERS = 5
+MAX_CANDIDATES = 30
+MAX_ALERTS = 5
+SCAN_INTERVAL = 180
+COOLDOWN_HOURS = 4
 
-      # Kodun eski isimleri kullanması ihtimaline karşı
-      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+MIN_SCORE = 65
+MIN_24H_VOLUME = 100000
+MIN_OI_CHANGE = 0.5
+MIN_FLOW_NOTIONAL = 10000
+MIN_FLOW_RATIO = 1.20
+MIN_VOLUME_RATIO_15M = 1.20
+MIN_VOLUME_RATIO_1H = 1.10
 
-    steps:
+MAX_15M_MOVE = 8.0
+MAX_1H_MOVE = 15.0
+MIN_RSI = 45.0
+MAX_RSI = 75.0
 
-      # ============================================================
-      # REPOSITORY
-      # ============================================================
-      - name: Repository indir
-        uses: actions/checkout@v4
+SL_ATR = 1.5
+TP1_ATR = 2.0
+TP2_ATR = 3.0
 
-      # ============================================================
-      # PYTHON
-      # ============================================================
-      - name: Python kur
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+STATE_FILE = "bitget_radar_state.json"
+TIMEOUT = 15
 
-      # ============================================================
-      # GEREKSİNİMLER
-      # ============================================================
-      - name: Gereksinimleri kur
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+EXCLUDED_BASES = {
+    "AAPL", "TSLA", "NVDA", "AMZN", "META", "MSFT",
+    "GOOGL", "GOOG", "NFLX", "COIN", "MSTR", "AMD",
+    "INTC", "SPY", "QQQ", "PLTR", "HOOD", "ORCL"
+}
 
-      # ============================================================
-      # REPOSITORY KONTROL
-      # ============================================================
-      - name: Repository kontrol
-        run: |
-          echo "======================================"
-          echo "📁 DOSYALAR"
-          echo "======================================"
-          find . -maxdepth 3 -type f | sort
+http = requests.Session()
+http.headers.update({"User-Agent": "Bitget-PrePump-Radar/10"})
+state_lock = threading.Lock()
+print_lock = threading.Lock()
 
-      # ============================================================
-      # TELEGRAM SECRET KONTROL
-      # ============================================================
-      - name: Telegram Secret kontrol
-        run: |
-          echo "======================================"
-          echo "🔐 TELEGRAM SECRET KONTROL"
-          echo "======================================"
 
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "❌ TELEGRAM_BOT_TOKEN bulunamadı!"
-            exit 1
-          fi
+# ============================================================
+# GENEL FONKSIYONLAR
+# ============================================================
 
-          if [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "❌ TELEGRAM_CHAT_ID bulunamadı!"
-            exit 1
-          fi
+def log(message):
+    with print_lock:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"{message}",
+            flush=True
+        )
 
-          echo "✅ TELEGRAM_BOT_TOKEN bulundu"
-          echo "✅ TELEGRAM_CHAT_ID bulundu"
-          echo "✅ Telegram Secret bağlantısı hazır"
 
-      # ============================================================
-      # RADAR
-      # ============================================================
-      - name: Radar çalıştır
-        run: |
-          echo "======================================"
-          echo "🚀 MEXC PRE-PUMP RADAR V3"
-          echo "======================================"
+def number(value, default=0.0):
+    try:
+        result = float(value)
+        if result == result and abs(result) != float("inf"):
+            return result
+    except (TypeError, ValueError):
+        pass
+    return default
 
-          python main.py
 
-      # ============================================================
-      # TAMAMLANDI
-      # ============================================================
-      - name: Sonuç
-        if: success()
-        run: |
-          echo "======================================"
-          echo "✅ RADAR BAŞARIYLA TAMAMLANDI"
-          echo "======================================"
+def average(values):
+    return sum(values) / len(values) if values else 0.0
+
+
+def percent_change(old, new):
+    if old <= 0:
+        return 0.0
+    return (new - old) / old * 100.0
+
+
+def api_get(path, params=None):
+    try:
+        response = http.get(
+            BASE_URL + path,
+            params=params,
+            timeout=TIMEOUT
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("code") != "00000":
+            log(
+                f"API hatasi {path}: "
+                f"{result.get('code')} {result.get('msg', '')}"
+            )
+            return None
+
+        return result.get("data")
+
+    except Exception as exc:
+        log(f"API baglanti hatasi {path}: {exc}")
+        return None
+
+
+# ============================================================
+# DURUM DOSYASI / COOLDOWN
+# ============================================================
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, ValueError):
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    data.setdefault("sent", {})
+    data.setdefault("oi", {})
+    return data
+
+
+state = load_state()
+
+
+def save_state():
+    try:
+        with state_lock:
+            temp_file = STATE_FILE + ".tmp"
+
+            with open(temp_file, "w", encoding="utf-8") as file:
+                json.dump(state, file, ensure_ascii=False, indent=2)
+
+            os.replace(temp_file, STATE_FILE)
+
+    except OSError as exc:
+        log(f"State kaydetme hatasi: {exc}")
+
+
+def cooling(symbol, direction):
+    key = f"{symbol}_{direction}"
+
+    with state_lock:
+        item = state["sent"].get(key, {})
+
+    if isinstance(item, dict):
+        sent_time = number(item.get("time"))
+    else:
+        sent_time = number(item)
+
+    return time.time() - sent_time < COOLDOWN_HOURS * 3600
+
+
+def mark_sent(symbol, direction):
+    with state_lock:
+        state["sent"][f"{symbol}_{direction}"] = {
+            "time": time.time()
+        }
+
+    save_state()
+
+
+def get_previous_oi(symbol):
+    with state_lock:
+        return number(state["oi"].get(symbol))
+
+
+def update_oi(values):
+    with state_lock:
+        for symbol, value in values.items():
+            if value > 0:
+                state["oi"][symbol] = value
+
+    save_state()
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_ID:
+        log("BOT_TOKEN veya CHAT_ID ayarlanmamis.")
+        return False
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "disable_web_page_preview": True
+            },
+            timeout=TIMEOUT
+        )
+
+        result = response.json()
+
+        if response.ok and result.get("ok"):
+            return True
+
+        log(f"Telegram hatasi: {result}")
+        return False
+
+    except Exception as exc:
+        log(f"Telegram baglanti hatasi: {exc}")
+        return False
+
+
+# ============================================================
+# BITGET KONTRATLARI VE TICKER
+# ============================================================
+
+def get_contracts():
+    data = api_get(
+        "/api/v2/mix/market/contracts",
+        {"productType": PRODUCT_TYPE}
+    )
+
+    if not isinstance(data, list):
+        return []
+
+    symbols = []
+
+    for item in data:
+        symbol = str(item.get("symbol", "")).upper()
+        base = str(item.get("baseCoin", "")).upper()
+
+        if not symbol.endswith("USDT"):
+            continue
+
+        if base in EXCLUDED_BASES:
+            continue
+
+        if item.get("symbolStatus") not in (None, "normal"):
+            continue
+
+        symbols.append(symbol)
+
+    return symbols
+
+
+def get_tickers():
+    data = api_get(
+        "/api/v2/mix/market/tickers",
+        {"productType": PRODUCT_TYPE}
+    )
+
+    if not isinstance(data, list):
+        return {}
+
+    return {
+        item["symbol"]: item
+        for item in data
+        if isinstance(item, dict) and item.get("symbol")
+    }
+
+
+def get_price(ticker):
+    return number(ticker.get("lastPr"))
+
+
+def get_24h_volume(ticker):
+    return number(
+        ticker.get("usdtVolume"),
+        number(ticker.get("quoteVolume"))
+    )
+
+
+def get_24h_change(ticker):
+    value = number(ticker.get("change24h"))
+
+    if abs(value) <= 1:
+        return value * 100.0
+
+    return value
+
+
+# ============================================================
+# MUM VERISI
+# ============================================================
+
+def get_candles(symbol, interval, limit=80):
+    data = api_get(
+        "/api/v2/mix/market/candles",
+        {
+            "symbol": symbol,
+            "productType": PRODUCT_TYPE,
+            "granularity": interval,
+            "limit": str(limit)
+        }
+    )
+
+    if not isinstance(data, list):
+        return []
+
+    result = []
+
+    for row in data:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+
+        candle = {
+            "time": number(row[0]),
+            "open": number(row[1]),
+            "high": number(row[2]),
+            "low": number(row[3]),
+            "close": number(row[4]),
+            "volume": number(row[5])
+        }
+
+        if candle["close"] > 0:
+            result.append(candle)
+
+    result.sort(key=lambda item: item["time"])
+
+    # Acik olabilecek son mum kullanilmaz.
+    if len(result) > 1:
+        result = result[:-1]
+
+    return result[-limit:]
+
+
+# ============================================================
+# RSI / ATR / HACIM / TREND
+# ============================================================
+
+def calculate_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return 50.0
+
+    changes = [
+        closes[i] - closes[i - 1]
+        for i in range(len(closes) - period, len(closes))
+    ]
+
+    gains = [max(x, 0.0) for x in changes]
+    losses = [max(-x, 0.0) for x in changes]
+
+    gain_avg = average(gains)
+    loss_avg = average(losses)
+
+    if loss_avg == 0:
+        return 100.0 if gain_avg > 0 else 50.0
+
+    rs = gain_avg / loss_avg
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def calculate_atr(candles, period=14):
+    if len(candles) < period + 1:
+        return 0.0
+
+    ranges = []
+
+    for i in range(1, len(candles)):
+        candle = candles[i]
+        previous_close = candles[i - 1]["close"]
+
+        ranges.append(max(
+            candle["high"] - candle["low"],
+            abs(candle["high"] - previous_close),
+            abs(candle["low"] - previous_close)
+        ))
+
+    return average(ranges[-period:])
+
+
+def volume_ratio(candles, period=20):
+    if len(candles) < period + 2:
+        return 1.0
+
+    baseline = average([
+        item["volume"]
+        for item in candles[-period - 1:-1]
+    ])
+
+    current = candles[-1]["volume"]
+
+    return current / baseline if baseline > 0 else 1.0
+
+
+def get_trend(candles):
+    if len(candles) < 30:
+        return "NEUTRAL"
+
+    closes = [item["close"] for item in candles]
+
+    fast = average(closes[-9:])
+    slow = average(closes[-26:])
+
+    if fast > slow and closes[-1] >= closes[-2]:
+        return "LONG"
+
+    if fast < slow and closes[-1] <= closes[-2]:
+        return "SHORT"
+
+    return "NEUTRAL"
+
+
+def get_structure(candles):
+    if len(candles) < 12:
+        return "NEUTRAL"
+
+    recent = candles[-6:]
+    previous = candles[-12:-6]
+
+    rh = max(item["high"] for item in recent)
+    rl = min(item["low"] for item in recent)
+    ph = max(item["high"] for item in previous)
+    pl = min(item["low"] for item in previous)
+
+    if rh > ph and rl > pl:
+        return "LONG"
+
+    if rh < ph and rl < pl:
+        return "SHORT"
+
+    return "NEUTRAL"
+
+
+# ============================================================
+# YAKLASIK SUPPLY / DEMAND
+# ============================================================
+
+def find_zones(candles):
+    if len(candles) < 30:
+        return None, None
+
+    demand = None
+    supply = None
+    recent = candles[-60:]
+
+    for i in range(2, len(recent) - 3):
+        candle = recent[i]
+        future = recent[i + 1:i + 4]
+
+        move = percent_change(
+            candle["close"],
+            future[-1]["close"]
+        )
+
+        if move >= 2.0:
+            demand = (
+                candle["low"],
+                max(candle["open"], candle["close"])
+            )
+
+        elif move <= -2.0:
+            supply = (
+                min(candle["open"], candle["close"]),
+                candle["high"]
+            )
+
+    return demand, supply
+
+
+def near_zone(price, zone, tolerance=0.015):
+    if not zone:
+        return False
+
+    low, high = zone
+
+    return (
+        low * (1 - tolerance)
+        <= price
+        <= high * (1 + tolerance)
+    )
+
+
+# ============================================================
+# SON ISLEMLERDEN ALIM / SATIM AKISI
+# ============================================================
+
+def get_trade_flow(symbol):
+    data = api_get(
+        "/api/v2/mix/market/fills",
+        {
+            "symbol": symbol,
+            "productType": PRODUCT_TYPE,
+            "limit": "100"
+        }
+    )
+
+    buy = 0.0
+    sell = 0.0
+
+    if not isinstance(data, list):
+        return {
+            "buy": 0.0,
+            "sell": 0.0,
+            "total": 0.0,
+            "ratio": 1.0
+        }
+
+    for trade in data:
+        price = number(trade.get("price"))
+        size = number(trade.get("size"))
+        side = str(trade.get("side", "")).lower()
+
+        if price <= 0 or size <= 0:
+            continue
+
+        notional = price * size
+
+        if side == "buy":
+            buy += notional
+        elif side == "sell":
+            sell += notional
+
+    ratio = (
+        buy / sell
+        if sell > 0
+        else (99.0 if buy > 0 else 1.0)
+    )
+
+    return {
+        "buy": buy,
+        "sell": sell,
+        "total": buy + sell,
+        "ratio": ratio
+    }
+
+
+# ============================================================
+# OPEN INTEREST
+# ============================================================
+
+def get_open_interest(symbol):
+    data = api_get(
+        "/api/v2/mix/market/open-interest",
+        {
+            "symbol": symbol,
+            "productType": PRODUCT_TYPE
+        }
+    )
+
+    if not isinstance(data, dict):
+        return 0.0
+
+    items = data.get("openInterestList", [])
+
+    if not isinstance(items, list) or not items:
+        return 0.0
+
+    item = items[0]
+
+    return number(
+        item.get("size"),
+        number(item.get("openInterest"))
+    )
+
+
+# ============================================================
+# BTC YON FILTRESI
+# ============================================================
+
+def get_btc_direction():
+    candles_1h = get_candles("BTCUSDT", "1H", 60)
+    candles_4h = get_candles("BTCUSDT", "4H", 60)
+
+    if len(candles_1h) < 30 or len(candles_4h) < 30:
+        return "NEUTRAL"
+
+    trend_1h = get_trend(candles_1h)
+    trend_4h = get_trend(candles_4h)
+
+    if trend_1h == "LONG" and trend_4h == "LONG":
+        return "LONG"
+
+    if trend_1h == "SHORT" and trend_4h == "SHORT":
+        return "SHORT"
+
+    return "NEUTRAL"
+
+
+# ============================================================
+# COIN ANALIZI
+# ============================================================
+
+def analyze_symbol(symbol, ticker, btc_direction):
+    try:
+        price = get_price(ticker)
+        volume24 = get_24h_volume(ticker)
+        change24 = get_24h_change(ticker)
+
+        if price <= 0 or volume24 < MIN_24H_VOLUME:
+            return None
+
+        c15 = get_candles(symbol, "15m", 80)
+        c1 = get_candles(symbol, "1H", 80)
+        c4 = get_candles(symbol, "4H", 80)
+
+        if min(len(c15), len(c1), len(c4)) < 30:
+            return None
+
+        closes15 = [item["close"] for item in c15]
+        closes1 = [item["close"] for item in c1]
+
+        rsi15 = calculate_rsi(closes15)
+        rsi1 = calculate_rsi(closes1)
+
+        vr15 = volume_ratio(c15)
+        vr1 = volume_ratio(c1)
+
+        trend1 = get_trend(c1)
+        trend4 = get_trend(c4)
+
+        structure1 = get_structure(c1)
+        structure4 = get_structure(c4)
+
+        move15 = percent_change(closes15[-2], closes15[-1])
+        move1 = percent_change(closes1[-2], closes1[-1])
+
+        # Degisken adlari ayarlarla birebir uyumludur.
+        if abs(move15) > MAX_15M_MOVE:
+            return None
+
+        if abs(move1) > MAX_1H_MOVE:
+            return None
+
+        demand, supply = find_zones(c4)
+
+        flow = get_trade_flow(symbol)
+        oi = get_open_interest(symbol)
+        old_oi = get_previous_oi(symbol)
+
+        oi_change = (
+            percent_change(old_oi, oi)
+            if old_oi > 0 and oi > 0
+            else 0.0
+        )
+
+        atr_value = calculate_atr(c15)
+
+        long_score = 0
+        short_score = 0
+        long_reasons = []
+        short_reasons = []
+
+        # HACIM
+        if vr15 >= MIN_VOLUME_RATIO_15M:
+            long_score += 10
+            short_score += 10
+            long_reasons.append(f"15M hacim x{vr15:.2f}")
+            short_reasons.append(f"15M hacim x{vr15:.2f}")
+
+        if vr1 >= MIN_VOLUME_RATIO_1H:
+            long_score += 6
+            short_score += 6
+
+        # RSI
+        if MIN_RSI <= rsi15 <= MAX_RSI:
+            long_score += 4
+            short_score += 4
+
+        if rsi15 > 50:
+            long_score += 5
+            long_reasons.append(f"RSI15 {rsi15:.1f}")
+        elif rsi15 < 50:
+            short_score += 5
+            short_reasons.append(f"RSI15 {rsi15:.1f}")
+
+        if rsi1 > 50:
+            long_score += 8
+            long_reasons.append(f"RSI1H {rsi1:.1f}")
+        elif rsi1 < 50:
+            short_score += 8
+            short_reasons.append(f"RSI1H {rsi1:.1f}")
+
+        # TREND
+        if trend1 == "LONG":
+            long_score += 10
+            long_reasons.append("1H trend yukari")
+        elif trend1 == "SHORT":
+            short_score += 10
+            short_reasons.append("1H trend asagi")
+
+        if trend4 == "LONG":
+            long_score += 12
+            long_reasons.append("4H trend yukari")
+        elif trend4 == "SHORT":
+            short_score += 12
+            short_reasons.append("4H trend asagi")
+
+        # PIYASA YAPISI
+        if structure1 == "LONG":
+            long_score += 6
+            long_reasons.append("1H yapi pozitif")
+        elif structure1 == "SHORT":
+            short_score += 6
+            short_reasons.append("1H yapi negatif")
+
+        if structure4 == "LONG":
+            long_score += 8
+            long_reasons.append("4H yapi pozitif")
+        elif structure4 == "SHORT":
+            short_score += 8
+            short_reasons.append("4H yapi negatif")
+
+        # PARA AKISI
+        if flow["total"] >= MIN_FLOW_NOTIONAL:
+            if flow["ratio"] >= MIN_FLOW_RATIO:
+                long_score += 12
+                long_reasons.append(
+                    f"Alim akisi x{flow['ratio']:.2f}"
+                )
+
+            elif flow["ratio"] <= 1.0 / MIN_FLOW_RATIO:
+                short_score += 12
+                short_reasons.append(
+                    f"Satim akisi x{1.0 / flow['ratio']:.2f}"
+                )
+
+        # OI: ILK TARAMADA ONCEKI DEGER OLMAYABILIR
+        if old_oi > 0 and oi > 0 and oi_change >= MIN_OI_CHANGE:
+            if trend1 == "LONG":
+                long_score += 8
+                long_reasons.append(f"OI +%{oi_change:.2f}")
+            elif trend1 == "SHORT":
+                short_score += 8
+                short_reasons.append(f"OI +%{oi_change:.2f}")
+
+        # SUPPLY / DEMAND YAKINLIGI
+        if near_zone(price, demand):
+            long_score += 8
+            long_reasons.append("Demand bolgesine yakin")
+
+        if near_zone(price, supply):
+            short_score += 8
+            short_reasons.append("Supply bolgesine yakin")
+
+        # BTC FILTRESI
+        if btc_direction == "LONG":
+            long_score += 5
+            short_score -= 10
+            long_reasons.append("BTC yonu LONG")
+        elif btc_direction == "SHORT":
+            short_score += 5
+            long_score -= 10
+            short_reasons.append("BTC yonu SHORT")
+
+        if long_score >= short_score:
+            direction = "LONG"
+            score = long_score
+            reasons = long_reasons
+        else:
+            direction = "SHORT"
+            score = short_score
+            reasons = short_reasons
+
+        if score < MIN_SCORE:
+            return None
+
+        # BTC yonu belliyse ters yonde sinyal gonderme.
+        if (
+            btc_direction != "NEUTRAL"
+            and direction != btc_direction
+        ):
+            return None
+
+        # RSI asiri bolgedeyse yeni sinyali ele.
+        if direction == "LONG" and rsi15 > MAX_RSI:
+            return None
+
+        if direction == "SHORT" and rsi15 < (100.0 - MAX_RSI):
+            return None
+
+        if cooling(symbol, direction):
+            return None
+
+        # ATR TABANLI TAHMINI SEVIYELER
+        if atr_value > 0:
+            if direction == "LONG":
+                stop = price - SL_ATR * atr_value
+                tp1 = price + TP1_ATR * atr_value
+                tp2 = price + TP2_ATR * atr_value
+            else:
+                stop = price + SL_ATR * atr_value
+                tp1 = price - TP1_ATR * atr_value
+                tp2 = price - TP2_ATR * atr_value
+        else:
+            stop = 0.0
+            tp1 = 0.0
+            tp2 = 0.0
+
+        return {
+            "symbol": symbol,
+            "direction": direction,
+            "score": score,
+            "price": price,
+            "volume24": volume24,
+            "change24": change24,
+            "rsi15": rsi15,
+            "rsi1": rsi1,
+            "vr15": vr15,
+            "vr1": vr1,
+            "flow_ratio": flow["ratio"],
+            "flow_total": flow["total"],
+            "oi": oi,
+            "oi_change": oi_change,
+            "btc": btc_direction,
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "reasons": reasons
+        }
+
+    except Exception as exc:
+        log(f"{symbol} analiz hatasi: {exc}")
+        return None
+
+
+# ============================================================
+# TELEGRAM SINYAL MESAJI
+# ============================================================
+
+def format_signal(item):
+    emoji = "🟢" if item["direction"] == "LONG" else "🔴"
+
+    reasons = "\n".join(
+        f"- {reason}" for reason in item["reasons"][:6]
+    )
+
+    stop = f"{item['stop']:.8g}" if item["stop"] else "N/A"
+    tp1 = f"{item['tp1']:.8g}" if item["tp1"] else "N/A"
+    tp2 = f"{item['tp2']:.8g}" if item["tp2"] else "N/A"
+
+    return (
+        f"{emoji} BITGET PRE-PUMP RADAR\n\n"
+        f"Coin: {item['symbol']}\n"
+        f"Yon: {item['direction']}\n"
+        f"Puan: {item['score']}\n"
+        f"Fiyat: {item['price']:.8g}\n"
+        f"24S degisim: %{item['change24']:.2f}\n"
+        f"RSI 15M: {item['rsi15']:.1f}\n"
+        f"RSI 1H: {item['rsi1']:.1f}\n"
+        f"Hacim 15M: x{item['vr15']:.2f}\n"
+        f"Para akisi: x{item['flow_ratio']:.2f}\n"
+        f"OI degisimi: %{item['oi_change']:.2f}\n"
+        f"BTC yonu: {item['btc']}\n\n"
+        f"Stop referansi: {stop}\n"
+        f"TP1 referansi: {tp1}\n"
+        f"TP2 referansi: {tp2}\n\n"
+        f"Nedenler:\n{reasons}\n\n"
+        f"Bilgi: Otomatik emir acilmaz. "
+        f"Seviyeler ATR tabanli tahminlerdir."
+    )
+
+
+# ============================================================
+# ANA TARAMA
+# ============================================================
+
+def run_scan():
+    log("Bitget taramasi basladi.")
+
+    all_tickers = get_tickers()
+
+    if not all_tickers:
+        log("Ticker verisi alinamadi.")
+        return
+
+    symbols = get_contracts()
+
+    if not symbols:
+        log("Kontrat listesi alinamadi.")
+        return
+
+    candidates = []
+
+    for symbol in symbols:
+        ticker = all_tickers.get(symbol)
+
+        if not ticker:
+            continue
+
+        volume = get_24h_volume(ticker)
+        price = get_price(ticker)
+
+        if price > 0 and volume >= MIN_24H_VOLUME:
+            candidates.append((symbol, ticker, volume))
+
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    candidates = candidates[:MAX_CANDIDATES]
+
+    log(f"Aday sayisi: {len(candidates)}")
+
+    btc_direction = get_btc_direction()
+    log(f"BTC yon filtresi: {btc_direction}")
+
+    results = []
+    oi_updates = {}
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(
+                analyze_symbol,
+                symbol,
+                ticker,
+                btc_direction
+            ): symbol
+            for symbol, ticker, _ in candidates
+        }
+
+        for future in as_completed(futures):
+            symbol = futures[future]
+
+            try:
+                item = future.result()
+
+                if item:
+                    results.append(item)
+
+                # OI verisini sadece basarili analizlerden topla.
+                if item and item["oi"] > 0:
+                    oi_updates[symbol] = item["oi"]
+
+            except Exception as exc:
+                log(f"{symbol} sonuc hatasi: {exc}")
+
+    # OI karsilastirmasi sonraki tarama icin saklanir.
+    update_oi(oi_updates)
+
+    results.sort(key=lambda item: item["score"], reverse=True)
+    results = results[:MAX_ALERTS]
+
+    if not results:
+        log("Filtreleri gecen sinyal bulunamadi.")
+        return
+
+    sent_count = 0
+
+    for item in results:
+        message = format_signal(item)
+
+        if send_telegram(message):
+            mark_sent(item["symbol"], item["direction"])
+            sent_count += 1
+
+            log(
+                f"Sinyal gonderildi: {item['symbol']} "
+                f"{item['direction']} puan={item['score']}"
+            )
+        else:
+            log(f"Sinyal gonderilemedi: {item['symbol']}")
+
+    log(f"Tarama tamamlandi. Gonderilen sinyal: {sent_count}")
+
+
+# ============================================================
+# PROGRAM BASLANGICI
+# ============================================================
+
+def main():
+    log("BITGET PRE-PUMP RADAR V10 baslatildi.")
+
+    if not BOT_TOKEN or not CHAT_ID:
+        log("UYARI: BOT_TOKEN ve CHAT_ID gerekli.")
+
+    while True:
+        started = time.time()
+
+        try:
+            run_scan()
+
+        except KeyboardInterrupt:
+            log("Radar durduruldu.")
+            break
+
+        except Exception as exc:
+            log(f"Ana tarama hatasi: {exc}")
+
+        elapsed = time.time() - started
+        sleep_seconds = max(5, SCAN_INTERVAL - elapsed)
+
+        log(f"Sonraki tarama {int(sleep_seconds)} saniye sonra.")
+        time.sleep(sleep_seconds)
+
+
+if __name__ == "__main__":
+    main()
