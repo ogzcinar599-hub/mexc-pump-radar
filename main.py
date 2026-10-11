@@ -2,21 +2,20 @@
 import os
 import json
 import time
+import threading
 import requests
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# BITGET DEMAND RADAR V12
+# BITGET DEMAND RADAR V13
 # USDT FUTURES | 15M / 1H / 4H / 1D / 1W
-# Gunluk + haftalik demand bolgeleri
-# Telegram sinyalleri | Otomatik emir acmaz
+# Kisa Telegram mesaji + API 429 korumasi
 # ============================================================
 
 BASE = "https://api.bitget.com"
 PRODUCT = "USDT-FUTURES"
 
-# Mevcut GitHub Secrets isimleri ve alternatifleri
 BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
     or os.getenv("BOT_TOKEN")
@@ -29,9 +28,10 @@ CHAT_ID = (
     or ""
 ).strip()
 
-MAX_WORKERS = 4
-MAX_CANDIDATES = 40
-MAX_ALERTS = 10
+# API yukunu azalt
+MAX_WORKERS = 1
+MAX_CANDIDATES = 12
+MAX_ALERTS = 5
 
 MIN_24H_VOLUME = 100000
 MIN_SCORE = 55
@@ -47,8 +47,12 @@ WEEKLY_NEAR_PERCENT = 6.0
 
 COOLDOWN_HOURS = 4
 SL_ATR = 1.5
-TIMEOUT = 15
+TIMEOUT = 20
 STATE_FILE = "bitget_radar_state.json"
+
+# API istekleri arasinda bekleme
+REQUEST_DELAY = 0.40
+MAX_RETRIES = 5
 
 EXCLUDED = {
     "AAPL", "TSLA", "NVDA", "AMZN", "META", "MSFT",
@@ -57,7 +61,11 @@ EXCLUDED = {
 }
 
 http = requests.Session()
-http.headers.update({"User-Agent": "BitgetDemandRadar/12.0"})
+http.headers.update({"User-Agent": "BitgetDemandRadar/13.0"})
+
+# Tum API isteklerini siraya koy
+api_lock = threading.Lock()
+last_api_request = 0.0
 
 
 # ============================================================
@@ -94,25 +102,69 @@ def fmt(value):
     return f"{value:.10g}" if value else "N/A"
 
 
+# ============================================================
+# BITGET API - 429 / BAGLANTI HATASI KORUMASI
+# ============================================================
+
 def api_get(path, params=None):
-    try:
-        response = http.get(
-            BASE + path,
-            params=params,
-            timeout=TIMEOUT
-        )
-        response.raise_for_status()
-        result = response.json()
+    global last_api_request
 
-        if result.get("code") != "00000":
-            log(f"API hatasi {path}: {result.get('msg', result)}")
-            return None
+    for attempt in range(MAX_RETRIES):
+        try:
+            with api_lock:
+                wait = REQUEST_DELAY - (time.monotonic() - last_api_request)
+                if wait > 0:
+                    time.sleep(wait)
 
-        return result.get("data")
+                response = http.get(
+                    BASE + path,
+                    params=params,
+                    timeout=TIMEOUT
+                )
+                last_api_request = time.monotonic()
 
-    except Exception as exc:
-        log(f"API baglanti hatasi {path}: {exc}")
-        return None
+            if response.status_code == 429:
+                wait_seconds = min(2 ** attempt, 30)
+                log(
+                    f"Bitget 429 hiz siniri: {path}. "
+                    f"{wait_seconds} sn beklenecek."
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            if response.status_code in (500, 502, 503, 504):
+                wait_seconds = min(2 ** attempt, 20)
+                log(
+                    f"Bitget sunucu hatasi {response.status_code}. "
+                    f"{wait_seconds} sn sonra tekrar denenecek."
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            response.raise_for_status()
+            result = response.json()
+
+            if result.get("code") != "00000":
+                log(
+                    f"Bitget API hatasi {path}: "
+                    f"{result.get('msg', result)}"
+                )
+                return None
+
+            return result.get("data")
+
+        except (requests.RequestException, ValueError) as exc:
+            wait_seconds = min(2 ** attempt, 20)
+            log(
+                f"API istegi basarisiz "
+                f"({attempt + 1}/{MAX_RETRIES}) {path}: {exc}"
+            )
+
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(wait_seconds)
+
+    log(f"API istegi tum denemelerde basarisiz: {path}")
+    return None
 
 
 # ============================================================
@@ -121,10 +173,7 @@ def api_get(path, params=None):
 
 def send_telegram(message):
     if not BOT_TOKEN or not CHAT_ID:
-        log(
-            "Telegram ayari eksik. TELEGRAM_BOT_TOKEN ve "
-            "TELEGRAM_CHAT_ID GitHub Secrets isimlerini kontrol et."
-        )
+        log("Telegram token veya chat ID eksik.")
         return False
 
     try:
@@ -146,22 +195,24 @@ def send_telegram(message):
         log(f"Telegram API hatasi: {result}")
         return False
 
-    except Exception as exc:
+    except requests.RequestException as exc:
         log(f"Telegram gonderim hatasi: {exc}")
         return False
 
 
 # ============================================================
-# DURUM VE COOLDOWN
+# COOLDOWN DURUMU
 # ============================================================
 
 def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
         if isinstance(data, dict):
             data.setdefault("sent", {})
             return data
+
     except (OSError, ValueError):
         pass
 
@@ -174,9 +225,12 @@ state = load_state()
 def save_state():
     try:
         temp = STATE_FILE + ".tmp"
+
         with open(temp, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+
         os.replace(temp, STATE_FILE)
+
     except OSError as exc:
         log(f"Durum dosyasi kaydedilemedi: {exc}")
 
@@ -399,7 +453,7 @@ def get_structure(candles):
 
 
 # ============================================================
-# DEMAND VE SUPPLY BOLGELERI
+# DEMAND / SUPPLY BOLGELERI
 # ============================================================
 
 def find_zones(candles):
@@ -410,7 +464,6 @@ def find_zones(candles):
     supply = None
     recent = candles[-60:]
 
-    # En son olusan uygun bolgeyi ara.
     for i in range(len(recent) - 4, 1, -1):
         base = recent[i]
         future = recent[i + 1:i + 4]
@@ -457,7 +510,7 @@ def assess_demand(price, zone, near_percent):
     low, high = zone
 
     if low <= price <= high:
-        status = "BOLGE ICINDE"
+        status = "ICINDE"
         distance = 0.0
 
     elif price > high:
@@ -469,7 +522,6 @@ def assess_demand(price, zone, near_percent):
         status = "YAKLASIYOR"
 
     else:
-        # Bolgenin altina inmis fiyat LONG adayi sayilmaz.
         return None
 
     return {
@@ -549,7 +601,7 @@ def analyze_symbol(symbol, ticker, btc):
         if abs(move15) > MAX_MOVE15 or abs(move1) > MAX_MOVE1H:
             return None
 
-        demand4, supply4 = find_zones(c4)
+        demand4, _ = find_zones(c4)
         demand1d, _ = find_zones(c1d)
         demand1w, _ = find_zones(c1w)
 
@@ -558,104 +610,74 @@ def analyze_symbol(symbol, ticker, btc):
 
         long_score = 0
         short_score = 0
-        long_reasons = []
-        short_reasons = []
 
-        # HACIM
         if vr15 >= MIN_VOL_RATIO:
             long_score += 10
             short_score += 10
-            long_reasons.append(f"15M hacim x{vr15:.2f}")
-            short_reasons.append(f"15M hacim x{vr15:.2f}")
 
         if vr1 >= 1.10:
             long_score += 5
             short_score += 5
 
-        # RSI
         if MIN_RSI <= rsi15 <= MAX_RSI:
             long_score += 4
             short_score += 4
 
         if rsi15 > 50:
             long_score += 5
-            long_reasons.append(f"RSI 15M {rsi15:.1f}")
         elif rsi15 < 50:
             short_score += 5
-            short_reasons.append(f"RSI 15M {rsi15:.1f}")
 
         if rsi1 > 50:
             long_score += 7
-            long_reasons.append(f"RSI 1H {rsi1:.1f}")
         elif rsi1 < 50:
             short_score += 7
-            short_reasons.append(f"RSI 1H {rsi1:.1f}")
 
-        # TREND
         if trend1 == "LONG":
             long_score += 10
-            long_reasons.append("1H trend yukari")
         elif trend1 == "SHORT":
             short_score += 10
-            short_reasons.append("1H trend asagi")
 
         if trend4 == "LONG":
             long_score += 10
-            long_reasons.append("4H trend yukari")
         elif trend4 == "SHORT":
             short_score += 10
-            short_reasons.append("4H trend asagi")
 
-        # FIYAT YAPISI
         if structure1 == "LONG":
             long_score += 5
-            long_reasons.append("1H yukselen yapi")
         elif structure1 == "SHORT":
             short_score += 5
-            short_reasons.append("1H dusen yapi")
 
         if structure4 == "LONG":
             long_score += 5
-            long_reasons.append("4H yukselen yapi")
         elif structure4 == "SHORT":
             short_score += 5
-            short_reasons.append("4H dusen yapi")
 
-        # DEMAND
         if in_zone(price, demand4):
             long_score += 8
-            long_reasons.append("4H demand icinde")
 
         if daily:
             long_score += 12
-            long_reasons.append(f"Gunluk demand {daily['status']}")
 
         if weekly:
             long_score += 15
-            long_reasons.append(f"Haftalik demand {weekly['status']}")
 
         if daily and weekly:
             long_score += 8
-            long_reasons.append("Gunluk + haftalik demand uyumu")
 
-        # BTC FILTRESI
         if btc == "LONG":
             long_score += 5
             short_score -= 10
-            long_reasons.append("BTC trend pozitif")
         elif btc == "SHORT":
             short_score += 5
             long_score -= 10
-            short_reasons.append("BTC trend negatif")
 
         if long_score >= short_score:
             direction = "LONG"
             score = long_score
-            reasons = long_reasons
         else:
             direction = "SHORT"
             score = short_score
-            reasons = short_reasons
 
         if score < MIN_SCORE:
             return None
@@ -705,8 +727,7 @@ def analyze_symbol(symbol, ticker, btc):
             "tp1": tp1,
             "tp2": tp2,
             "daily": daily,
-            "weekly": weekly,
-            "reasons": reasons
+            "weekly": weekly
         }
 
     except Exception as exc:
@@ -715,52 +736,54 @@ def analyze_symbol(symbol, ticker, btc):
 
 
 # ============================================================
-# TELEGRAM MESAJI
+# KISA TELEGRAM MESAJI
 # ============================================================
-
-def format_zone(title, zone):
-    if not zone:
-        return f"{title}: uygun bolge bulunamadi"
-
-    return (
-        f"{title}: {zone['status']}\n"
-        f"Alt: {fmt(zone['low'])}\n"
-        f"Ust: {fmt(zone['high'])}\n"
-        f"Uzaklik: %{zone['distance']:.2f}"
-    )
-
 
 def format_signal(r):
     arrow = "🟢" if r["direction"] == "LONG" else "🔴"
 
-    reasons = "\n".join(
-        f"• {reason}" for reason in r["reasons"][:8]
-    )
+    daily = r.get("daily")
+    weekly = r.get("weekly")
+
+    if daily:
+        daily_text = (
+            f"{daily['low']:.8g} - {daily['high']:.8g}"
+            f" | %{daily['distance']:.2f}"
+        )
+        daily_status = daily["status"]
+    else:
+        daily_text = "Yok"
+        daily_status = "Bulunamadi"
+
+    if weekly:
+        weekly_text = (
+            f"{weekly['low']:.8g} - {weekly['high']:.8g}"
+            f" | %{weekly['distance']:.2f}"
+        )
+        weekly_status = weekly["status"]
+    else:
+        weekly_text = "Yok"
+        weekly_status = "Bulunamadi"
 
     return (
-        f"{arrow} BITGET DEMAND RADAR V12\n\n"
-        f"Coin: {r['symbol']}\n"
-        f"Yon: {r['direction']}\n"
-        f"Puan: {r['score']}\n"
-        f"Fiyat: {fmt(r['price'])}\n"
-        f"24S hacim: {r['volume24']:.0f} USDT\n"
-        f"24S degisim: %{r['change24']:.2f}\n"
-        f"RSI 15M: {r['rsi15']:.1f}\n"
-        f"RSI 1H: {r['rsi1']:.1f}\n"
-        f"15M hacim: x{r['vr15']:.2f}\n"
-        f"BTC yonu: {r['btc']}\n\n"
-        f"{format_zone('GUNLUK DEMAND', r['daily'])}\n\n"
-        f"{format_zone('HAFTALIK DEMAND', r['weekly'])}\n\n"
-        f"Stop referansi: {fmt(r['stop'])}\n"
-        f"TP1 referansi: {fmt(r['tp1'])}\n"
-        f"TP2 referansi: {fmt(r['tp2'])}\n\n"
-        f"Nedenler:\n{reasons}\n\n"
-        "Teknik tahmindir; otomatik emir acmaz."
+        f"{arrow} BITGET DEMAND RADAR\n\n"
+        f"{r['symbol']} | {r['direction']} | Puan {r['score']}\n"
+        f"Fiyat: {fmt(r['price'])}\n\n"
+        f"📍 Gunluk demand: {daily_status}\n"
+        f"{daily_text}\n\n"
+        f"📍 Haftalik demand: {weekly_status}\n"
+        f"{weekly_text}\n\n"
+        f"🛑 Stop: {fmt(r['stop'])}\n"
+        f"🎯 TP1: {fmt(r['tp1'])}\n"
+        f"🎯 TP2: {fmt(r['tp2'])}\n\n"
+        f"Hacim x{r['vr15']:.2f} | RSI {r['rsi15']:.0f}\n"
+        f"BTC: {r['btc']}\n\n"
+        "⚠️ Teknik sinyal; otomatik emir acmaz."
     )
 
 
 # ============================================================
-# TEK TARAMA - GITHUB ACTIONS
+# TARAMA
 # ============================================================
 
 def run_scan():
@@ -798,6 +821,7 @@ def run_scan():
 
     results = []
 
+    # Tek worker: ayni anda cok sayida API istegi gonderme.
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {
             pool.submit(analyze_symbol, symbol, ticker, btc): symbol
@@ -820,10 +844,14 @@ def run_scan():
 
     sent_count = 0
 
-    for result in results[:MAX_ALERTS]:
+    for result in results:
+        if sent_count >= MAX_ALERTS:
+            break
+
         if send_telegram(format_signal(result)):
             mark_sent(result["symbol"], result["direction"])
             sent_count += 1
+
             log(
                 f"Sinyal gonderildi: {result['symbol']} "
                 f"{result['direction']} puan={result['score']}"
@@ -835,12 +863,12 @@ def run_scan():
 
 
 def main():
-    log("BITGET DEMAND RADAR V12 basladi.")
+    log("BITGET DEMAND RADAR V13 basladi.")
 
     if not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError(
-            "Telegram Secret eksik. TELEGRAM_BOT_TOKEN / "
-            "TELEGRAM_CHAT_ID veya BOT_TOKEN / CHAT_ID kontrol et."
+            "Telegram Secret eksik. "
+            "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID kontrol et."
         )
 
     run_scan()
