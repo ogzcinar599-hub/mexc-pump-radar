@@ -8,10 +8,9 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# BITGET PRE-PUMP RADAR V9
-# USDT FUTURES | 15M + 1H + 4H
-# OI + PARA AKISI + RSI + HACIM + SUPPLY/DEMAND
-# Telegram alarmi uretir; otomatik emir acmaz.
+# BITGET PRE-PUMP + DEMAND RADAR V10
+# USDT FUTURES | 15M + 1H + 4H + 1D + 1W
+# Telegram alarmi | Otomatik emir acmaz
 # ============================================================
 
 BASE = "https://api.bitget.com"
@@ -20,10 +19,9 @@ PRODUCT = "USDT-FUTURES"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-MAX_WORKERS = 5
-MAX_CANDIDATES = 30
-MAX_ALERTS = 5
-SCAN_INTERVAL = 180
+MAX_WORKERS = 4
+MAX_CANDIDATES = 40
+MAX_ALERTS = 10
 COOLDOWN_HOURS = 4
 
 MIN_SCORE = 65
@@ -38,6 +36,10 @@ MAX_1H_MOVE = 15.0
 MIN_RSI = 45.0
 MAX_RSI = 75.0
 
+SL_ATR = 1.5
+DAILY_NEAR_PERCENT = 3.0
+WEEKLY_NEAR_PERCENT = 6.0
+
 STATE_FILE = "bitget_radar_state.json"
 TIMEOUT = 15
 
@@ -48,12 +50,12 @@ EXCLUDED = {
 }
 
 http = requests.Session()
-http.headers.update({"User-Agent": "BitgetPrePumpRadar/9.0"})
+http.headers.update({"User-Agent": "BitgetDemandRadar/10.0"})
 lock = threading.Lock()
 
 
 # ============================================================
-# GENEL YARDIMCILAR
+# YARDIMCILAR
 # ============================================================
 
 def log(message):
@@ -66,9 +68,9 @@ def log(message):
 
 def num(value, default=0.0):
     try:
-        result = float(value)
-        if result == result and abs(result) != float("inf"):
-            return result
+        value = float(value)
+        if value == value and abs(value) != float("inf"):
+            return value
     except (TypeError, ValueError):
         pass
     return default
@@ -93,7 +95,7 @@ def api_get(path, params=None):
         result = response.json()
 
         if result.get("code") != "00000":
-            log(f"API hata {path}: {result.get('msg', result)}")
+            log(f"API hatasi {path}: {result.get('msg', result)}")
             return None
 
         return result.get("data")
@@ -104,13 +106,13 @@ def api_get(path, params=None):
 
 
 # ============================================================
-# KALICI DURUM / COOLDOWN
+# DURUM / COOLDOWN / OI GECMISI
 # ============================================================
 
 def load_state():
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except (OSError, ValueError):
         data = {}
 
@@ -129,8 +131,8 @@ def save_state():
     try:
         with lock:
             temp = STATE_FILE + ".tmp"
-            with open(temp, "w", encoding="utf-8") as file:
-                json.dump(state, file, ensure_ascii=False, indent=2)
+            with open(temp, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
             os.replace(temp, STATE_FILE)
     except OSError as exc:
         log(f"State kaydetme hatasi: {exc}")
@@ -154,21 +156,25 @@ def mark_sent(symbol, direction):
         state["sent"][f"{symbol}_{direction}"] = {
             "time": time.time()
         }
-
     save_state()
 
 
 def get_previous_oi(symbol):
     with lock:
-        return num(state["oi"].get(symbol))
+        item = state["oi"].get(symbol, {})
+    if isinstance(item, dict):
+        return num(item.get("value"))
+    return num(item)
 
 
 def update_oi(values):
     with lock:
         for symbol, value in values.items():
             if value > 0:
-                state["oi"][symbol] = value
-
+                state["oi"][symbol] = {
+                    "value": value,
+                    "time": time.time()
+                }
     save_state()
 
 
@@ -178,13 +184,13 @@ def update_oi(values):
 
 def send_telegram(message):
     if not BOT_TOKEN or not CHAT_ID:
-        log("BOT_TOKEN veya CHAT_ID ayarlanmamis.")
+        log("BOT_TOKEN veya CHAT_ID eksik.")
         return False
 
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={
+            json={
                 "chat_id": CHAT_ID,
                 "text": message,
                 "disable_web_page_preview": True
@@ -192,21 +198,22 @@ def send_telegram(message):
             timeout=TIMEOUT
         )
 
+        response.raise_for_status()
         result = response.json()
 
-        if response.ok and result.get("ok"):
+        if result.get("ok"):
             return True
 
-        log(f"Telegram yaniti: {result}")
+        log(f"Telegram hatasi: {result}")
         return False
 
     except Exception as exc:
-        log(f"Telegram hatasi: {exc}")
+        log(f"Telegram gonderim hatasi: {exc}")
         return False
 
 
 # ============================================================
-# BITGET KONTRATLAR VE TICKER
+# BITGET KONTRATLARI / FIYATLAR
 # ============================================================
 
 def get_contracts():
@@ -226,16 +233,14 @@ def get_contracts():
 
         if not symbol.endswith("USDT"):
             continue
-
         if base_coin in EXCLUDED:
             continue
-
         if item.get("symbolStatus") not in (None, "normal"):
             continue
 
         symbols.append(symbol)
 
-    return symbols
+    return sorted(set(symbols))
 
 
 def get_tickers():
@@ -306,9 +311,9 @@ def get_candles(symbol, interval, limit=100):
         if candle["close"] > 0:
             candles.append(candle)
 
-    candles.sort(key=lambda candle: candle["time"])
+    candles.sort(key=lambda c: c["time"])
 
-    # Son mumun kapanmamış olma ihtimaline karşı çıkar.
+    # Son mum acik olabilir. Analizde kullanma.
     if len(candles) > 1:
         candles = candles[:-1]
 
@@ -316,7 +321,7 @@ def get_candles(symbol, interval, limit=100):
 
 
 # ============================================================
-# TEKNIK GOSTERGELER
+# RSI / ATR / HACIM / TREND
 # ============================================================
 
 def calculate_rsi(closes, period=14):
@@ -328,16 +333,16 @@ def calculate_rsi(closes, period=14):
         for i in range(len(closes) - period, len(closes))
     ]
 
-    gains = [max(change, 0.0) for change in changes]
-    losses = [max(-change, 0.0) for change in changes]
+    gains = [max(x, 0) for x in changes]
+    losses = [max(-x, 0) for x in changes]
 
-    avg_gain = avg(gains)
-    avg_loss = avg(losses)
+    gain = avg(gains)
+    loss = avg(losses)
 
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
+    if loss == 0:
+        return 100.0 if gain > 0 else 50.0
 
-    rs = avg_gain / avg_loss
+    rs = gain / loss
     return 100.0 - 100.0 / (1.0 + rs)
 
 
@@ -348,13 +353,13 @@ def calculate_atr(candles, period=14):
     ranges = []
 
     for i in range(1, len(candles)):
-        candle = candles[i]
-        previous_close = candles[i - 1]["close"]
+        c = candles[i]
+        previous = candles[i - 1]["close"]
 
         ranges.append(max(
-            candle["high"] - candle["low"],
-            abs(candle["high"] - previous_close),
-            abs(candle["low"] - previous_close)
+            c["high"] - c["low"],
+            abs(c["high"] - previous),
+            abs(c["low"] - previous)
         ))
 
     return avg(ranges[-period:])
@@ -365,27 +370,25 @@ def volume_ratio(candles, period=20):
         return 1.0
 
     baseline = avg([
-        candle["volume"]
-        for candle in candles[-period - 1:-1]
+        c["volume"] for c in candles[-period-1:-1]
     ])
 
-    current = candles[-1]["volume"]
-
-    return current / baseline if baseline > 0 else 1.0
+    return (
+        candles[-1]["volume"] / baseline
+        if baseline > 0 else 1.0
+    )
 
 
 def get_trend(candles):
     if len(candles) < 30:
         return "NEUTRAL"
 
-    closes = [candle["close"] for candle in candles]
-
+    closes = [c["close"] for c in candles]
     fast = avg(closes[-9:])
     slow = avg(closes[-26:])
 
     if fast > slow and closes[-1] >= closes[-2]:
         return "LONG"
-
     if fast < slow and closes[-1] <= closes[-2]:
         return "SHORT"
 
@@ -399,26 +402,29 @@ def get_structure(candles):
     recent = candles[-6:]
     previous = candles[-12:-6]
 
-    recent_high = max(c["high"] for c in recent)
-    recent_low = min(c["low"] for c in recent)
+    rh = max(c["high"] for c in recent)
+    rl = min(c["low"] for c in recent)
+    ph = max(c["high"] for c in previous)
+    pl = min(c["low"] for c in previous)
 
-    previous_high = max(c["high"] for c in previous)
-    previous_low = min(c["low"] for c in previous)
-
-    if recent_high > previous_high and recent_low > previous_low:
+    if rh > ph and rl > pl:
         return "LONG"
-
-    if recent_high < previous_high and recent_low < previous_low:
+    if rh < ph and rl < pl:
         return "SHORT"
 
     return "NEUTRAL"
 
 
 # ============================================================
-# YAKLASIK SUPPLY / DEMAND BOLGELERI
+# DEMAND / SUPPLY BOLGESI
 # ============================================================
 
 def find_zones(candles):
+    """
+    Basit baz + impuls yaklasimi.
+    Demand: baz mumunun dusuk fiyati ile govde ustu.
+    Supply: baz govdesi alti ile yuksek fiyat.
+    """
     if len(candles) < 30:
         return None, None
 
@@ -427,24 +433,74 @@ def find_zones(candles):
     recent = candles[-60:]
 
     for i in range(2, len(recent) - 3):
-        candle = recent[i]
+        base = recent[i]
         future = recent[i + 1:i + 4]
 
-        move = pct(candle["close"], future[-1]["close"])
+        if not future:
+            continue
 
-        if move >= 2.0:
+        base_range = base["high"] - base["low"]
+        if base_range <= 0:
+            continue
+
+        body_ratio = (
+            abs(base["close"] - base["open"]) / base_range
+        )
+
+        is_base = (
+            base["close"] <= base["open"]
+            or body_ratio <= 0.45
+        )
+
+        if not is_base:
+            continue
+
+        move = pct(base["close"], future[-1]["close"])
+
+        # Yukari displacement: demand adayi
+        if move >= 2.0 and future[-1]["close"] > base["high"]:
             demand = (
-                candle["low"],
-                max(candle["open"], candle["close"])
+                base["low"],
+                max(base["open"], base["close"])
             )
 
-        elif move <= -2.0:
+        # Asagi displacement: supply adayi
+        elif move <= -2.0 and future[-1]["close"] < base["low"]:
             supply = (
-                min(candle["open"], candle["close"]),
-                candle["high"]
+                min(base["open"], base["close"]),
+                base["high"]
             )
 
     return demand, supply
+
+
+def zone_status(price, zone, near_percent):
+    if not zone:
+        return None
+
+    low, high = zone
+
+    if low <= price <= high:
+        return {
+            "status": "BOLGE ICINDE",
+            "low": low,
+            "high": high,
+            "distance": 0.0
+        }
+
+    if price > high:
+        distance = (price - high) / high * 100
+
+        if distance <= near_percent:
+            return {
+                "status": "YAKLASIYOR",
+                "low": low,
+                "high": high,
+                "distance": distance
+            }
+
+    # Bolgenin altina inen fiyat LONG demand adayi sayilmaz.
+    return None
 
 
 def near_zone(price, zone, tolerance=0.015):
@@ -452,16 +508,17 @@ def near_zone(price, zone, tolerance=0.015):
         return False
 
     low, high = zone
+    return low * (1 - tolerance) <= price <= high * (1 + tolerance)
 
-    return (
-        low * (1 - tolerance)
-        <= price
-        <= high * (1 + tolerance)
-    )
+
+def fmt_price(value):
+    if not value:
+        return "N/A"
+    return f"{value:.10g}"
 
 
 # ============================================================
-# ALIM / SATIM AKISI
+# PARA AKISI
 # ============================================================
 
 def get_trade_flow(symbol):
@@ -493,12 +550,12 @@ def get_trade_flow(symbol):
         if price <= 0 or size <= 0:
             continue
 
-        notional = price * size
+        value = price * size
 
         if side == "buy":
-            buy_notional += notional
+            buy_notional += value
         elif side == "sell":
-            sell_notional += notional
+            sell_notional += value
 
     ratio = (
         buy_notional / sell_notional
@@ -541,7 +598,7 @@ def get_open_interest(symbol):
 
 
 # ============================================================
-# BTC YON FILTRESI
+# BTC YONU
 # ============================================================
 
 def get_btc_direction():
@@ -556,7 +613,6 @@ def get_btc_direction():
 
     if t1 == "LONG" and t4 == "LONG":
         return "LONG"
-
     if t1 == "SHORT" and t4 == "SHORT":
         return "SHORT"
 
@@ -567,7 +623,7 @@ def get_btc_direction():
 # COIN ANALIZI
 # ============================================================
 
-def analyze_symbol(symbol, ticker, btc_direction):
+def analyze_symbol(symbol, ticker, btc):
     try:
         price = ticker_price(ticker)
         volume24 = ticker_volume(ticker)
@@ -579,6 +635,8 @@ def analyze_symbol(symbol, ticker, btc_direction):
         c15 = get_candles(symbol, "15m", 100)
         c1 = get_candles(symbol, "1H", 100)
         c4 = get_candles(symbol, "4H", 100)
+        c1d = get_candles(symbol, "1D", 100)
+        c1w = get_candles(symbol, "1W", 100)
 
         if min(len(c15), len(c1), len(c4)) < 30:
             return None
@@ -594,14 +652,22 @@ def analyze_symbol(symbol, ticker, btc_direction):
 
         trend1 = get_trend(c1)
         trend4 = get_trend(c4)
-
         structure1 = get_structure(c1)
         structure4 = get_structure(c4)
 
         move15 = pct(closes15[-2], closes15[-1])
         move1 = pct(closes1[-2], closes1[-1])
 
-        demand, supply = find_zones(c4)
+        demand4, supply4 = find_zones(c4)
+        demand1d, supply1d = find_zones(c1d)
+        demand1w, supply1w = find_zones(c1w)
+
+        daily_demand = zone_status(
+            price, demand1d, DAILY_NEAR_PERCENT
+        )
+        weekly_demand = zone_status(
+            price, demand1w, WEEKLY_NEAR_PERCENT
+        )
 
         flow = get_trade_flow(symbol)
         oi = get_open_interest(symbol)
@@ -609,18 +675,17 @@ def analyze_symbol(symbol, ticker, btc_direction):
 
         oi_change = (
             pct(old_oi, oi)
-            if old_oi > 0 and oi > 0
-            else 0.0
+            if old_oi > 0 and oi > 0 else 0.0
         )
 
-        atr_value = calculate_atr(c15)
+        atr = calculate_atr(c15)
 
         long_score = 0
         short_score = 0
         long_reasons = []
         short_reasons = []
 
-        # HACIM
+        # Hacim
         if vr15 >= MIN_VOL_RATIO:
             long_score += 10
             short_score += 10
@@ -638,19 +703,19 @@ def analyze_symbol(symbol, ticker, btc_direction):
 
         if rsi15 > 50:
             long_score += 5
-            long_reasons.append(f"RSI15 {rsi15:.1f}")
+            long_reasons.append(f"RSI 15M {rsi15:.1f}")
         elif rsi15 < 50:
             short_score += 5
-            short_reasons.append(f"RSI15 {rsi15:.1f}")
+            short_reasons.append(f"RSI 15M {rsi15:.1f}")
 
         if rsi1 > 50:
             long_score += 8
-            long_reasons.append(f"RSI1H {rsi1:.1f}")
+            long_reasons.append(f"RSI 1H {rsi1:.1f}")
         elif rsi1 < 50:
             short_score += 8
-            short_reasons.append(f"RSI1H {rsi1:.1f}")
+            short_reasons.append(f"RSI 1H {rsi1:.1f}")
 
-        # TREND
+        # Trend
         if trend1 == "LONG":
             long_score += 10
             long_reasons.append("1H trend yukari")
@@ -665,7 +730,7 @@ def analyze_symbol(symbol, ticker, btc_direction):
             short_score += 12
             short_reasons.append("4H trend asagi")
 
-        # FIYAT YAPISI
+        # Fiyat yapisi
         if structure1 == "LONG":
             long_score += 6
             long_reasons.append("1H yapi pozitif")
@@ -680,52 +745,67 @@ def analyze_symbol(symbol, ticker, btc_direction):
             short_score += 8
             short_reasons.append("4H yapi negatif")
 
-        # PARA AKISI
+        # Demand / supply
+        if near_zone(price, demand4):
+            long_score += 8
+            long_reasons.append("4H demand icinde/yakin")
+
+        if near_zone(price, supply4):
+            short_score += 8
+            short_reasons.append("4H supply icinde/yakin")
+
+        # Gunluk ve haftalik demand
+        if daily_demand:
+            long_score += 10
+            long_reasons.append(
+                f"Gunluk demand {daily_demand['status']}"
+            )
+
+        if weekly_demand:
+            long_score += 15
+            long_reasons.append(
+                f"Haftalik demand {weekly_demand['status']}"
+            )
+
+        # Ayni anda gunluk + haftalik demand onceligi
+        if daily_demand and weekly_demand:
+            long_score += 8
+            long_reasons.append("Gunluk + haftalik demand uyumu")
+
+        # Para akisi: API verisi yoksa puan verme.
         if flow["total"] >= MIN_FLOW_NOTIONAL:
             if flow["ratio"] >= MIN_FLOW_RATIO:
                 long_score += 12
                 long_reasons.append(
                     f"Alim akisi x{flow['ratio']:.2f}"
                 )
-
             elif flow["ratio"] <= 1 / MIN_FLOW_RATIO:
                 short_score += 12
                 short_reasons.append(
-                    f"Satim akisi x{1 / flow['ratio']:.2f}"
+                    f"Satim akisi x{flow['ratio']:.2f}"
                 )
 
-        # OI ARTISI YON TEK BASINA BELIRLEMEZ.
-        # Trendle ayni yone gittiginde ek puan verilir.
+        # OI: ilk taramada onceki veri olmayabilir.
         if old_oi > 0 and oi > 0 and oi_change >= MIN_OI_CHANGE:
             if trend1 == "LONG":
                 long_score += 8
-                long_reasons.append(f"OI +%{oi_change:.2f}")
+                long_reasons.append(f"OI artisi %{oi_change:.2f}")
             elif trend1 == "SHORT":
                 short_score += 8
-                short_reasons.append(f"OI +%{oi_change:.2f}")
+                short_reasons.append(f"OI artisi %{oi_change:.2f}")
 
-        # SUPPLY / DEMAND
-        if near_zone(price, demand):
-            long_score += 8
-            long_reasons.append("Demand bolgesine yakin")
-
-        if near_zone(price, supply):
-            short_score += 8
-            short_reasons.append("Supply bolgesine yakin")
-
-        # BTC FILTRESI
-        if btc_direction == "LONG":
+        # BTC filtresi
+        if btc == "LONG":
             long_score += 5
             short_score -= 10
-            long_reasons.append("BTC trend pozitif")
-
-        elif btc_direction == "SHORT":
+            long_reasons.append("BTC 1H+4H pozitif")
+        elif btc == "SHORT":
             short_score += 5
             long_score -= 10
-            short_reasons.append("BTC trend negatif")
+            short_reasons.append("BTC 1H+4H negatif")
 
-        # Asiri hizli hareket etmis coinleri kovalamama filtresi.
-        if abs(move15) > MAX_MOVE15 or abs(move1) > MAX_MOVE1H:
+        # Asiri hizli hareket eden coinleri kovalamama
+        if abs(move15) > MAX_15M_MOVE or abs(move1) > MAX_1H_MOVE:
             return None
 
         if long_score >= short_score:
@@ -740,30 +820,34 @@ def analyze_symbol(symbol, ticker, btc_direction):
         if score < MIN_SCORE:
             return None
 
-        # BTC ters yon filtresi.
-        if btc_direction != "NEUTRAL" and direction != btc_direction:
+        # BTC ters yon filtresi
+        if btc != "NEUTRAL" and direction != btc:
             return None
 
-        # RSI asiri bolgelerdeyse sinyali ele.
         if direction == "LONG" and rsi15 > MAX_RSI:
             return None
 
         if direction == "SHORT" and rsi15 < 100 - MAX_RSI:
             return None
 
+        # Demand odakli radar: demand bolgesinde LONG tercih et.
+        if direction == "LONG" and not (
+            daily_demand or weekly_demand or near_zone(price, demand4)
+        ):
+            return None
+
         if is_cooling(symbol, direction):
             return None
 
-        # ATR tabanli tahmini seviyeler.
-        if atr_value > 0:
+        if atr > 0:
             if direction == "LONG":
-                stop = price - SL_ATR * atr_value
-                tp1 = price + 2.0 * atr_value
-                tp2 = price + 3.0 * atr_value
+                stop = price - SL_ATR * atr
+                tp1 = price + 2.0 * atr
+                tp2 = price + 3.0 * atr
             else:
-                stop = price + SL_ATR * atr_value
-                tp1 = price - 2.0 * atr_value
-                tp2 = price - 3.0 * atr_value
+                stop = price + SL_ATR * atr
+                tp1 = price - 2.0 * atr
+                tp2 = price - 3.0 * atr
         else:
             stop = tp1 = tp2 = 0.0
 
@@ -782,10 +866,12 @@ def analyze_symbol(symbol, ticker, btc_direction):
             "flow_total": flow["total"],
             "oi": oi,
             "oi_change": oi_change,
-            "btc": btc_direction,
+            "btc": btc,
             "stop": stop,
             "tp1": tp1,
             "tp2": tp2,
+            "daily": daily_demand,
+            "weekly": weekly_demand,
             "reasons": reasons
         }
 
@@ -798,61 +884,69 @@ def analyze_symbol(symbol, ticker, btc_direction):
 # TELEGRAM MESAJI
 # ============================================================
 
-def format_signal(result):
-    arrow = "🟢" if result["direction"] == "LONG" else "🔴"
-
-    reasons = "\n".join(
-        f"• {reason}" for reason in result["reasons"][:6]
-    )
-
-    stop_text = f"{result['stop']:.8g}" if result["stop"] else "N/A"
-    tp1_text = f"{result['tp1']:.8g}" if result["tp1"] else "N/A"
-    tp2_text = f"{result['tp2']:.8g}" if result["tp2"] else "N/A"
+def format_zone(label, zone):
+    if not zone:
+        return f"{label}: uygun demand bulunamadi"
 
     return (
-        f"{arrow} BITGET PRE-PUMP RADAR\n\n"
-        f"Coin: {result['symbol']}\n"
-        f"Yon: {result['direction']}\n"
-        f"Puan: {result['score']}\n"
-        f"Fiyat: {result['price']:.8g}\n"
-        f"24S degisim: %{result['change24']:.2f}\n"
-        f"RSI 15M: {result['rsi15']:.1f}\n"
-        f"RSI 1H: {result['rsi1']:.1f}\n"
-        f"Hacim 15M: x{result['vr15']:.2f}\n"
-        f"Para akisi: x{result['flow_ratio']:.2f}\n"
-        f"OI degisimi: %{result['oi_change']:.2f}\n"
-        f"BTC yonu: {result['btc']}\n\n"
-        f"Stop referansi: {stop_text}\n"
-        f"TP1 referansi: {tp1_text}\n"
-        f"TP2 referansi: {tp2_text}\n\n"
+        f"{label}: {zone['status']}\n"
+        f"Alt: {fmt_price(zone['low'])}\n"
+        f"Ust: {fmt_price(zone['high'])}\n"
+        f"Uzaklik: %{zone['distance']:.2f}"
+    )
+
+
+def format_signal(r):
+    arrow = "🟢" if r["direction"] == "LONG" else "🔴"
+
+    reasons = "\n".join(
+        f"• {reason}" for reason in r["reasons"][:8]
+    )
+
+    return (
+        f"{arrow} BITGET DEMAND RADAR V10\n\n"
+        f"Coin: {r['symbol']}\n"
+        f"Yon: {r['direction']}\n"
+        f"Puan: {r['score']}\n"
+        f"Fiyat: {fmt_price(r['price'])}\n"
+        f"24S hacim: {r['volume24']:.0f} USDT\n"
+        f"24S degisim: %{r['change24']:.2f}\n"
+        f"RSI 15M: {r['rsi15']:.1f}\n"
+        f"RSI 1H: {r['rsi1']:.1f}\n"
+        f"15M hacim orani: x{r['vr15']:.2f}\n"
+        f"Para akisi orani: x{r['flow_ratio']:.2f}\n"
+        f"OI degisimi: %{r['oi_change']:.2f}\n"
+        f"BTC yonu: {r['btc']}\n\n"
+        f"{format_zone('GUNLUK DEMAND', r['daily'])}\n\n"
+        f"{format_zone('HAFTALIK DEMAND', r['weekly'])}\n\n"
+        f"Stop referansi: {fmt_price(r['stop'])}\n"
+        f"TP1 referansi: {fmt_price(r['tp1'])}\n"
+        f"TP2 referansi: {fmt_price(r['tp2'])}\n\n"
         f"Nedenler:\n{reasons}\n\n"
-        f"Not: Otomatik emir degildir. "
-        f"Seviyeler ATR tabanli tahmindir."
+        "Uyari: Teknik tahmin; otomatik emir acmaz. "
+        "Demand bolgeleri gecmis mumlardan hesaplanir."
     )
 
 
 # ============================================================
-# ANA TARAMA
+# ANA TARAMA - GITHUB ACTIONS ICIN TEK TUR
 # ============================================================
 
 def run_scan():
     log("Bitget taramasi basladi.")
 
-    all_tickers = get_tickers()
-    if not all_tickers:
-        log("Ticker verisi alinmadi.")
-        return
+    tickers = get_tickers()
+    if not tickers:
+        raise RuntimeError("Bitget ticker verisi alinamadi.")
 
     symbols = get_contracts()
     if not symbols:
-        log("Kontrat listesi alinmadi.")
-        return
+        raise RuntimeError("Bitget kontrat listesi alinamadi.")
 
-    # En yuksek 24 saatlik hacimli adaylari sec.
     candidates = []
 
     for symbol in symbols:
-        ticker = all_tickers.get(symbol)
+        ticker = tickers.get(symbol)
         if not ticker:
             continue
 
@@ -862,13 +956,13 @@ def run_scan():
         if price > 0 and volume >= MIN_24H_VOLUME:
             candidates.append((symbol, ticker, volume))
 
-    candidates.sort(key=lambda x: x[2], reverse=True)
+    candidates.sort(key=lambda item: item[2], reverse=True)
     candidates = candidates[:MAX_CANDIDATES]
 
-    log(f"Aday sayisi: {len(candidates)}")
+    log(f"Analiz edilecek aday: {len(candidates)}")
 
     btc = get_btc_direction()
-    log(f"BTC yon filtresi: {btc}")
+    log(f"BTC yonu: {btc}")
 
     results = []
     oi_updates = {}
@@ -884,63 +978,45 @@ def run_scan():
 
             try:
                 result = future.result()
-
                 if result:
                     results.append(result)
                     if result["oi"] > 0:
                         oi_updates[symbol] = result["oi"]
-
             except Exception as exc:
                 log(f"{symbol} sonuc hatasi: {exc}")
 
-    # OI onceki degerlerini tarama sonunda guncelle.
     update_oi(oi_updates)
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda item: item["score"], reverse=True)
     results = results[:MAX_ALERTS]
 
     if not results:
         log("Filtreleri gecen sinyal yok.")
         return
 
-    for result in results:
-        message = format_signal(result)
+    sent_count = 0
 
-        # Sadece Telegram basarili olursa cooldown baslat.
-        if send_telegram(message):
+    for result in results:
+        if send_telegram(format_signal(result)):
             mark_sent(result["symbol"], result["direction"])
+            sent_count += 1
             log(
-                f"Telegram sinyali: {result['symbol']} "
+                f"Gonderildi: {result['symbol']} "
                 f"{result['direction']} puan={result['score']}"
             )
-        else:
-            log(f"Telegram gonderilemedi: {result['symbol']}")
+        time.sleep(1)
 
-    log(f"Tarama bitti. Sinyal sayisi: {len(results)}")
+    log(f"Tarama bitti. Telegram'a gonderilen: {sent_count}")
 
 
 def main():
-    log("BITGET PRE-PUMP RADAR V9 baslatildi.")
+    log("BITGET DEMAND RADAR V10 baslatildi.")
 
     if not BOT_TOKEN or not CHAT_ID:
-        log("UYARI: BOT_TOKEN ve CHAT_ID ortam degiskenleri gerekli.")
+        raise RuntimeError("BOT_TOKEN veya CHAT_ID GitHub Secrets'ta eksik.")
 
-    while True:
-        started = time.time()
-
-        try:
-            run_scan()
-        except KeyboardInterrupt:
-            log("Radar durduruldu.")
-            break
-        except Exception as exc:
-            log(f"Ana tarama hatasi: {exc}")
-
-        elapsed = time.time() - started
-        sleep_time = max(5, SCAN_INTERVAL - elapsed)
-
-        log(f"Sonraki taramaya {int(sleep_time)} saniye.")
-        time.sleep(sleep_time)
+    run_scan()
+    log("Tarama tamamlandi.")
 
 
 if __name__ == "__main__":
