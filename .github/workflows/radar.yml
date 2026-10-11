@@ -28,4 +28,4 @@ jobs:
         run: pip install requests
 
       - name: Run demand radar
-        run: python radar.py
+        run: python main.py
