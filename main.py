@@ -5,12 +5,11 @@ import time
 import threading
 import requests
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# BITGET DEMAND RADAR V13
+# BITGET DEMAND RADAR V14
 # USDT FUTURES | 15M / 1H / 4H / 1D / 1W
-# Kisa Telegram mesaji + API 429 korumasi
+# LONG + SHORT | 25 COIN | TELEGRAM
 # ============================================================
 
 BASE = "https://api.bitget.com"
@@ -28,8 +27,6 @@ CHAT_ID = (
     or ""
 ).strip()
 
-# API yukunu azalt
-MAX_WORKERS = 1
 MAX_CANDIDATES = 25
 MAX_ALERTS = 5
 
@@ -48,9 +45,9 @@ WEEKLY_NEAR_PERCENT = 6.0
 COOLDOWN_HOURS = 4
 SL_ATR = 1.5
 TIMEOUT = 20
+
 STATE_FILE = "bitget_radar_state.json"
 
-# API istekleri arasinda bekleme
 REQUEST_DELAY = 0.40
 MAX_RETRIES = 5
 
@@ -61,15 +58,15 @@ EXCLUDED = {
 }
 
 http = requests.Session()
-http.headers.update({"User-Agent": "BitgetDemandRadar/13.0"})
+http.headers.update({"User-Agent": "BitgetDemandRadar/14.0"})
 
-# Tum API isteklerini siraya koy
 api_lock = threading.Lock()
 last_api_request = 0.0
+state_lock = threading.Lock()
 
 
 # ============================================================
-# GENEL YARDIMCILAR
+# YARDIMCILAR
 # ============================================================
 
 def log(message):
@@ -103,7 +100,7 @@ def fmt(value):
 
 
 # ============================================================
-# BITGET API - 429 / BAGLANTI HATASI KORUMASI
+# BITGET API
 # ============================================================
 
 def api_get(path, params=None):
@@ -112,7 +109,9 @@ def api_get(path, params=None):
     for attempt in range(MAX_RETRIES):
         try:
             with api_lock:
-                wait = REQUEST_DELAY - (time.monotonic() - last_api_request)
+                wait = REQUEST_DELAY - (
+                    time.monotonic() - last_api_request
+                )
                 if wait > 0:
                     time.sleep(wait)
 
@@ -124,21 +123,15 @@ def api_get(path, params=None):
                 last_api_request = time.monotonic()
 
             if response.status_code == 429:
-                wait_seconds = min(2 ** attempt, 30)
-                log(
-                    f"Bitget 429 hiz siniri: {path}. "
-                    f"{wait_seconds} sn beklenecek."
-                )
-                time.sleep(wait_seconds)
+                delay = min(2 ** attempt, 30)
+                log(f"429 hiz siniri: {path}; {delay} sn bekleniyor.")
+                time.sleep(delay)
                 continue
 
             if response.status_code in (500, 502, 503, 504):
-                wait_seconds = min(2 ** attempt, 20)
-                log(
-                    f"Bitget sunucu hatasi {response.status_code}. "
-                    f"{wait_seconds} sn sonra tekrar denenecek."
-                )
-                time.sleep(wait_seconds)
+                delay = min(2 ** attempt, 20)
+                log(f"Sunucu hatasi {response.status_code}; {delay} sn.")
+                time.sleep(delay)
                 continue
 
             response.raise_for_status()
@@ -154,16 +147,16 @@ def api_get(path, params=None):
             return result.get("data")
 
         except (requests.RequestException, ValueError) as exc:
-            wait_seconds = min(2 ** attempt, 20)
+            delay = min(2 ** attempt, 20)
             log(
-                f"API istegi basarisiz "
-                f"({attempt + 1}/{MAX_RETRIES}) {path}: {exc}"
+                f"API hatasi ({attempt + 1}/{MAX_RETRIES}) "
+                f"{path}: {exc}"
             )
 
             if attempt < MAX_RETRIES - 1:
-                time.sleep(wait_seconds)
+                time.sleep(delay)
 
-    log(f"API istegi tum denemelerde basarisiz: {path}")
+    log(f"API basarisiz: {path}")
     return None
 
 
@@ -192,7 +185,7 @@ def send_telegram(message):
         if result.get("ok"):
             return True
 
-        log(f"Telegram API hatasi: {result}")
+        log(f"Telegram hatasi: {result}")
         return False
 
     except requests.RequestException as exc:
@@ -201,7 +194,7 @@ def send_telegram(message):
 
 
 # ============================================================
-# COOLDOWN DURUMU
+# TEKRAR SINYAL ENGELI
 # ============================================================
 
 def load_state():
@@ -224,32 +217,44 @@ state = load_state()
 
 def save_state():
     try:
-        temp = STATE_FILE + ".tmp"
+        with state_lock:
+            temp = STATE_FILE + ".tmp"
 
-        with open(temp, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            with open(temp, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
 
-        os.replace(temp, STATE_FILE)
+            os.replace(temp, STATE_FILE)
 
     except OSError as exc:
         log(f"Durum dosyasi kaydedilemedi: {exc}")
 
 
 def is_cooling(symbol, direction):
-    item = state.get("sent", {}).get(f"{symbol}_{direction}", {})
-    timestamp = num(item.get("time")) if isinstance(item, dict) else 0
+    with state_lock:
+        item = state.get("sent", {}).get(
+            f"{symbol}_{direction}", {}
+        )
+        timestamp = (
+            num(item.get("time"))
+            if isinstance(item, dict)
+            else 0
+        )
 
     return time.time() - timestamp < COOLDOWN_HOURS * 3600
 
 
 def mark_sent(symbol, direction):
-    state.setdefault("sent", {})
-    state["sent"][f"{symbol}_{direction}"] = {"time": time.time()}
+    with state_lock:
+        state.setdefault("sent", {})
+        state["sent"][f"{symbol}_{direction}"] = {
+            "time": time.time()
+        }
+
     save_state()
 
 
 # ============================================================
-# KONTRATLAR VE FIYATLAR
+# KONTRATLAR VE HACIM
 # ============================================================
 
 def get_contracts():
@@ -302,10 +307,12 @@ def ticker_price(ticker):
 
 
 def ticker_volume(ticker):
-    return num(
-        ticker.get("usdtVolume"),
-        num(ticker.get("quoteVolume"))
-    )
+    value = num(ticker.get("usdtVolume"))
+
+    if value <= 0:
+        value = num(ticker.get("quoteVolume"))
+
+    return value
 
 
 def ticker_change(ticker):
@@ -351,7 +358,7 @@ def get_candles(symbol, interval, limit=100):
 
     candles.sort(key=lambda c: c["time"])
 
-    # Son mum tamamlanmamis olabilir.
+    # Son mumun tamamlanmis oldugu varsayilmaz.
     if len(candles) > 1:
         candles = candles[:-1]
 
@@ -359,7 +366,7 @@ def get_candles(symbol, interval, limit=100):
 
 
 # ============================================================
-# RSI, ATR, HACIM VE TREND
+# RSI / ATR / HACIM / TREND
 # ============================================================
 
 def calculate_rsi(closes, period=14):
@@ -391,13 +398,13 @@ def calculate_atr(candles, period=14):
     ranges = []
 
     for i in range(1, len(candles)):
-        c = candles[i]
-        prev = candles[i - 1]["close"]
+        candle = candles[i]
+        previous = candles[i - 1]["close"]
 
         ranges.append(max(
-            c["high"] - c["low"],
-            abs(c["high"] - prev),
-            abs(c["low"] - prev)
+            candle["high"] - candle["low"],
+            abs(candle["high"] - previous),
+            abs(candle["low"] - previous)
         ))
 
     return average(ranges[-period:])
@@ -411,7 +418,10 @@ def volume_ratio(candles, period=20):
         c["volume"] for c in candles[-period-1:-1]
     ])
 
-    return candles[-1]["volume"] / baseline if baseline > 0 else 1.0
+    return (
+        candles[-1]["volume"] / baseline
+        if baseline > 0 else 1.0
+    )
 
 
 def get_trend(candles):
@@ -453,7 +463,7 @@ def get_structure(candles):
 
 
 # ============================================================
-# DEMAND / SUPPLY BOLGELERI
+# SUPPLY / DEMAND BOLGELERI
 # ============================================================
 
 def find_zones(candles):
@@ -469,6 +479,7 @@ def find_zones(candles):
         future = recent[i + 1:i + 4]
 
         candle_range = base["high"] - base["low"]
+
         if candle_range <= 0:
             continue
 
@@ -487,49 +498,62 @@ def find_zones(candles):
         move = pct(base["close"], future[-1]["close"])
 
         if move >= 2 and future[-1]["close"] > base["high"]:
-            demand = (
-                base["low"],
-                max(base["open"], base["close"])
-            )
-            break
+            if demand is None:
+                demand = (
+                    base["low"],
+                    max(base["open"], base["close"])
+                )
 
         if move <= -2 and future[-1]["close"] < base["low"]:
-            supply = (
-                min(base["open"], base["close"]),
-                base["high"]
-            )
+            if supply is None:
+                supply = (
+                    min(base["open"], base["close"]),
+                    base["high"]
+                )
+
+        if demand and supply:
             break
 
     return demand, supply
 
 
-def assess_demand(price, zone, near_percent):
+def assess_zone(price, zone, near_percent, direction):
     if not zone:
         return None
 
     low, high = zone
 
     if low <= price <= high:
-        status = "ICINDE"
-        distance = 0.0
+        return {
+            "low": low,
+            "high": high,
+            "status": "ICINDE",
+            "distance": 0.0
+        }
 
-    elif price > high:
+    if direction == "LONG" and price > high:
         distance = (price - high) / high * 100
 
-        if distance > near_percent:
-            return None
+        if distance <= near_percent:
+            return {
+                "low": low,
+                "high": high,
+                "status": "YAKLASIYOR",
+                "distance": distance
+            }
 
-        status = "YAKLASIYOR"
+    if direction == "SHORT" and price < low:
+        distance = (low - price) / low * 100
 
-    else:
-        return None
+        if distance <= near_percent:
+            return {
+                "low": low,
+                "high": high,
+                "status": "YAKLASIYOR",
+                "distance": distance
+            }
 
-    return {
-        "low": low,
-        "high": high,
-        "status": status,
-        "distance": distance
-    }
+    return None
 
 
 def in_zone(price, zone):
@@ -601,16 +625,28 @@ def analyze_symbol(symbol, ticker, btc):
         if abs(move15) > MAX_MOVE15 or abs(move1) > MAX_MOVE1H:
             return None
 
-        demand4, _ = find_zones(c4)
-        demand1d, _ = find_zones(c1d)
-        demand1w, _ = find_zones(c1w)
+        demand4, supply4 = find_zones(c4)
+        demand1d, supply1d = find_zones(c1d)
+        demand1w, supply1w = find_zones(c1w)
 
-        daily = assess_demand(price, demand1d, DAILY_NEAR_PERCENT)
-        weekly = assess_demand(price, demand1w, WEEKLY_NEAR_PERCENT)
+        daily_long = assess_zone(
+            price, demand1d, DAILY_NEAR_PERCENT, "LONG"
+        )
+        weekly_long = assess_zone(
+            price, demand1w, WEEKLY_NEAR_PERCENT, "LONG"
+        )
+
+        daily_short = assess_zone(
+            price, supply1d, DAILY_NEAR_PERCENT, "SHORT"
+        )
+        weekly_short = assess_zone(
+            price, supply1w, WEEKLY_NEAR_PERCENT, "SHORT"
+        )
 
         long_score = 0
         short_score = 0
 
+        # Hacim
         if vr15 >= MIN_VOL_RATIO:
             long_score += 10
             short_score += 10
@@ -619,6 +655,7 @@ def analyze_symbol(symbol, ticker, btc):
             long_score += 5
             short_score += 5
 
+        # RSI
         if MIN_RSI <= rsi15 <= MAX_RSI:
             long_score += 4
             short_score += 4
@@ -633,6 +670,7 @@ def analyze_symbol(symbol, ticker, btc):
         elif rsi1 < 50:
             short_score += 7
 
+        # Trend
         if trend1 == "LONG":
             long_score += 10
         elif trend1 == "SHORT":
@@ -643,6 +681,7 @@ def analyze_symbol(symbol, ticker, btc):
         elif trend4 == "SHORT":
             short_score += 10
 
+        # Piyasa yapisi
         if structure1 == "LONG":
             long_score += 5
         elif structure1 == "SHORT":
@@ -653,18 +692,33 @@ def analyze_symbol(symbol, ticker, btc):
         elif structure4 == "SHORT":
             short_score += 5
 
+        # 4 saatlik bolgeler
         if in_zone(price, demand4):
             long_score += 8
 
-        if daily:
+        if in_zone(price, supply4):
+            short_score += 8
+
+        # Gunluk / haftalik bolgeler
+        if daily_long:
             long_score += 12
 
-        if weekly:
+        if weekly_long:
             long_score += 15
 
-        if daily and weekly:
+        if daily_long and weekly_long:
             long_score += 8
 
+        if daily_short:
+            short_score += 12
+
+        if weekly_short:
+            short_score += 15
+
+        if daily_short and weekly_short:
+            short_score += 8
+
+        # BTC yon filtresi: ters yone puan kes
         if btc == "LONG":
             long_score += 5
             short_score -= 10
@@ -682,35 +736,53 @@ def analyze_symbol(symbol, ticker, btc):
         if score < MIN_SCORE:
             return None
 
+        # BTC belirgin yon gosteriyorsa ters sinyali engelle
         if btc != "NEUTRAL" and direction != btc:
             return None
 
+        # LONG icin talep bolgesi gerekli
         if direction == "LONG":
             if rsi15 > MAX_RSI:
                 return None
 
-            if not (daily or weekly or in_zone(price, demand4)):
+            if not (
+                daily_long
+                or weekly_long
+                or in_zone(price, demand4)
+            ):
                 return None
 
-        if direction == "SHORT" and rsi15 < 100 - MAX_RSI:
-            return None
+        # SHORT icin arz bolgesi gerekli
+        if direction == "SHORT":
+            if rsi15 < 100 - MAX_RSI:
+                return None
+
+            if not (
+                daily_short
+                or weekly_short
+                or in_zone(price, supply4)
+            ):
+                return None
 
         if is_cooling(symbol, direction):
             return None
 
         atr = calculate_atr(c15)
 
-        if atr > 0:
-            if direction == "LONG":
-                stop = price - SL_ATR * atr
-                tp1 = price + 2 * atr
-                tp2 = price + 3 * atr
-            else:
-                stop = price + SL_ATR * atr
-                tp1 = price - 2 * atr
-                tp2 = price - 3 * atr
+        if atr <= 0:
+            return None
+
+        if direction == "LONG":
+            stop = price - SL_ATR * atr
+            tp1 = price + 2 * atr
+            tp2 = price + 3 * atr
         else:
-            stop = tp1 = tp2 = 0.0
+            stop = price + SL_ATR * atr
+            tp1 = price - 2 * atr
+            tp2 = price - 3 * atr
+
+        daily = daily_long if direction == "LONG" else daily_short
+        weekly = weekly_long if direction == "LONG" else weekly_short
 
         return {
             "symbol": symbol,
@@ -722,6 +794,7 @@ def analyze_symbol(symbol, ticker, btc):
             "rsi15": rsi15,
             "rsi1": rsi1,
             "vr15": vr15,
+            "vr1": vr1,
             "btc": btc,
             "stop": stop,
             "tp1": tp1,
@@ -736,47 +809,34 @@ def analyze_symbol(symbol, ticker, btc):
 
 
 # ============================================================
-# KISA TELEGRAM MESAJI
+# TELEGRAM MESAJI
 # ============================================================
 
 def format_signal(r):
     arrow = "🟢" if r["direction"] == "LONG" else "🔴"
 
-    daily = r.get("daily")
-    weekly = r.get("weekly")
+    def zone_text(zone):
+        if not zone:
+            return "Bulunamadi\nYok"
 
-    if daily:
-        daily_text = (
-            f"{daily['low']:.8g} - {daily['high']:.8g}"
-            f" | %{daily['distance']:.2f}"
+        return (
+            f"{zone['status']}\n"
+            f"{zone['low']:.8g} - {zone['high']:.8g}"
+            f" | %{zone['distance']:.2f}"
         )
-        daily_status = daily["status"]
-    else:
-        daily_text = "Yok"
-        daily_status = "Bulunamadi"
-
-    if weekly:
-        weekly_text = (
-            f"{weekly['low']:.8g} - {weekly['high']:.8g}"
-            f" | %{weekly['distance']:.2f}"
-        )
-        weekly_status = weekly["status"]
-    else:
-        weekly_text = "Yok"
-        weekly_status = "Bulunamadi"
 
     return (
-        f"{arrow} BITGET DEMAND RADAR\n\n"
+        f"{arrow} BITGET DEMAND RADAR V14\n\n"
         f"{r['symbol']} | {r['direction']} | Puan {r['score']}\n"
         f"Fiyat: {fmt(r['price'])}\n\n"
-        f"📍 Gunluk demand: {daily_status}\n"
-        f"{daily_text}\n\n"
-        f"📍 Haftalik demand: {weekly_status}\n"
-        f"{weekly_text}\n\n"
+        f"📍 Gunluk bolge:\n{zone_text(r['daily'])}\n\n"
+        f"📍 Haftalik bolge:\n{zone_text(r['weekly'])}\n\n"
         f"🛑 Stop: {fmt(r['stop'])}\n"
         f"🎯 TP1: {fmt(r['tp1'])}\n"
         f"🎯 TP2: {fmt(r['tp2'])}\n\n"
-        f"Hacim x{r['vr15']:.2f} | RSI {r['rsi15']:.0f}\n"
+        f"Hacim 15M x{r['vr15']:.2f} | "
+        f"1H x{r['vr1']:.2f}\n"
+        f"RSI 15M: {r['rsi15']:.0f} | RSI 1H: {r['rsi1']:.0f}\n"
         f"BTC: {r['btc']}\n\n"
         "⚠️ Teknik sinyal; otomatik emir acmaz."
     )
@@ -790,10 +850,12 @@ def run_scan():
     log("Bitget taramasi basladi.")
 
     tickers = get_tickers()
+
     if not tickers:
         raise RuntimeError("Bitget ticker verisi alinamadi.")
 
     symbols = get_contracts()
+
     if not symbols:
         raise RuntimeError("Bitget kontrat listesi alinamadi.")
 
@@ -801,6 +863,7 @@ def run_scan():
 
     for symbol in symbols:
         ticker = tickers.get(symbol)
+
         if not ticker:
             continue
 
@@ -810,7 +873,7 @@ def run_scan():
         if price > 0 and volume >= MIN_24H_VOLUME:
             candidates.append((symbol, ticker, volume))
 
-    candidates.sort(key=lambda x: x[2], reverse=True)
+    candidates.sort(key=lambda item: item[2], reverse=True)
     candidates = candidates[:MAX_CANDIDATES]
 
     log(f"Kontrat sayisi: {len(symbols)}")
@@ -821,22 +884,14 @@ def run_scan():
 
     results = []
 
-    # Tek worker: ayni anda cok sayida API istegi gonderme.
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {
-            pool.submit(analyze_symbol, symbol, ticker, btc): symbol
-            for symbol, ticker, _ in candidates
-        }
+    # API 429 riskini azaltmak icin sirali analiz
+    for symbol, ticker, _ in candidates:
+        result = analyze_symbol(symbol, ticker, btc)
 
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as exc:
-                log(f"Analiz sonucu hatasi: {exc}")
+        if result:
+            results.append(result)
 
-    results.sort(key=lambda r: r["score"], reverse=True)
+    results.sort(key=lambda item: item["score"], reverse=True)
 
     if not results:
         log("Filtreleri gecen sinyal bulunamadi.")
@@ -863,7 +918,7 @@ def run_scan():
 
 
 def main():
-    log("BITGET DEMAND RADAR V13 basladi.")
+    log("BITGET DEMAND RADAR V14 basladi.")
 
     if not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError(
